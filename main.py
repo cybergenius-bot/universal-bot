@@ -1,63 +1,104 @@
-# main.py
 import os
-import logging
-from typing import Final
+import base64
+from io import BytesIO
+
+from fastapi import FastAPI, Request
+from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application, ApplicationBuilder, AIORateLimiter,
+    MessageHandler, CommandHandler, filters
 )
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+TOKEN = os.environ["TELEGRAM_TOKEN"]
+OPENAI_KEY = os.environ["OPENAI_API_KEY"]
+
+client = OpenAI(api_key=OPENAI_KEY)
+
+app = FastAPI()
+application: Application = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .rate_limiter(AIORateLimiter())
+    .build()
 )
-log = logging.getLogger("universal-bot")
 
-# --- ENV ---
-TOKEN: Final[str] = os.getenv("TELEGRAM_TOKEN", "")
-if not TOKEN:
-    raise RuntimeError("No TELEGRAM_TOKEN provided")
+# ===== Команды =====
 
-PORT: int = int(os.getenv("PORT", "8080"))
+async def start_cmd(update: Update, _):
+    await update.message.reply_text(
+        "Привет! Я универсальный помощник.\n"
+        "Пиши вопросы на любые темы, присылай фото — разберу."
+    )
 
-# Полный публичный домен Railway БЕЗ слэша на конце,
-# например: https://universal-bot-production.up.railway.app
-WEBHOOK_BASE: str = os.getenv("WEBHOOK_URL", "").rstrip("/")
+application.add_handler(CommandHandler("start", start_cmd))
 
-# Можно оставить по умолчанию
-WEBHOOK_PATH: str = os.getenv("WEBHOOK_PATH", "webhook")
+# ===== Помощники для ИИ =====
 
+async def ask_openai_text(prompt: str) -> str:
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.3,
+        messages=[
+            {"role": "system",
+             "content": (
+                "Ты полезный русскоязычный ассистент. "
+                "Отвечай коротко и по делу, давай шаги только если нужно."
+             )},
+            {"role": "user", "content": prompt}
+        ],
+    )
+    return resp.choices[0].message.content.strip()
 
-# --- HANDLERS ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот запущен ✅ Пиши — отвечу.")
+async def ask_openai_vision(photo_bytes: bytes, user_prompt: str = "") -> str:
+    b64 = base64.b64encode(photo_bytes).decode()
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_prompt or "Опиши, что на фото, и ответь на вопрос пользователя, если он есть."},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+            ]
+        }]
+    )
+    return resp.choices[0].message.content.strip()
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    txt = update.message.text or ""
-    await update.message.reply_text(f"Ты написал: {txt}")
+# ===== Обработчики сообщений =====
 
+async def on_text(update: Update, _):
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+    try:
+        reply = await ask_openai_text(text)
+    except Exception as e:
+        reply = f"Не смог получить ответ ИИ: {e}"
+    await update.message.reply_text(reply)
 
-def main():
-    app = Application.builder().token(TOKEN).build()
+async def on_photo(update: Update, context):
+    try:
+        # берём самое большое фото
+        file_id = update.message.photo[-1].file_id
+        file = await context.bot.get_file(file_id)
+        buf = await file.download_as_bytearray()
+        # подпись пользователя (если есть)
+        caption = (update.message.caption or "").strip()
+        reply = await ask_openai_vision(bytes(buf), caption)
+    except Exception as e:
+        reply = f"Не удалось обработать фото: {e}"
+    await update.message.reply_text(reply)
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+application.add_handler(MessageHandler(filters.PHOTO, on_photo))
 
-    if WEBHOOK_BASE:
-        # Синхронная обёртка — сама настроит и поднимет вебхук и event loop.
-        webhook_url = f"{WEBHOOK_BASE}/{WEBHOOK_PATH}"
-        log.info("Run webhook on %s", webhook_url)
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=WEBHOOK_PATH,
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-        )
-    else:
-        # Режим поллинга для локальных тестов
-        app.run_polling(drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
+# ===== FastAPI webhook endpoint =====
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.initialize()
+    await application.process_update(update)
+    return {"ok": True}
