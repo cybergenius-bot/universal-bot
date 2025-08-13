@@ -1,4 +1,16 @@
-python-telegram-bot==20.7
 fastapi==0.110.0
-uvicorn==0.29.0
-openai==1.37.0
+uvicorn[standard]==0.29.0
+
+# Telegram
+python-telegram-bot==20.7
+
+# OpenAI SDK
+openai==1.35.13
+
+# Совместимая версия httpx (PTB 20.7 + OpenAI)
+httpx==0.25.2
+
+# Совместимости для fastapi/pydantic
+pydantic==2.6.4
+pydantic-core==2.16.3
+starlette==0.37.2
