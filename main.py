@@ -1,206 +1,141 @@
 import os
-import asyncio
 import logging
 from typing import Optional
 
-import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes,
-    filters
+    Application, ApplicationBuilder,
+    CommandHandler, MessageHandler, ContextTypes, filters
 )
 
-# ---------- ЛОГИ ----------
+# ==== ЛОГИ ====
 logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
 )
 log = logging.getLogger("universal-bot")
 
-# ---------- ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ----------
-BOT_TOKEN = os.environ["TELEGRAM_TOKEN"]            # токен бота от @BotFather
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")   # ключ OpenAI
-PUBLIC_URL = os.environ["PUBLIC_URL"]               # ваш домен Railway, напр. https://universal-bot-production.up.railway.app
+# ==== ENV ====
+BOT_TOKEN     = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_URL   = os.getenv("WEBHOOK_URL")  # например https://universal-bot-production.up.railway.app
+PORT          = int(os.getenv("PORT", "8080"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-PAYPAL_CLIENT_ID = os.environ["PAYPAL_CLIENT_ID"]
-PAYPAL_SECRET    = os.environ["PAYPAL_SECRET"]
-PAYPAL_MODE      = os.environ.get("PAYPAL_MODE", "sandbox").lower()  # 'sandbox' или 'live'
+if not BOT_TOKEN:
+    raise RuntimeError("Нет BOT_TOKEN в переменных окружения.")
 
-PAYPAL_BASE = "https://api-m.sandbox.paypal.com" if PAYPAL_MODE == "sandbox" else "https://api-m.paypal.com"
+# ==== OpenAI (опционально) ====
+use_ai = False
+ai_client = None
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        ai_client = OpenAI(api_key=OPENAI_API_KEY)
+        use_ai = True
+        log.info("OpenAI подключен.")
+    except Exception as e:
+        log.warning("OpenAI не инициализировался: %s", e)
 
-# ---------- OpenAI ----------
-OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-OPENAI_MODEL = "gpt-4o-mini"
-
-# ---------- Telegram Application ----------
+# ==== Telegram Application ====
 application: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ---------- FastAPI ----------
+# --- Handlers ---
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Я универсальный бот. Пиши вопрос — отвечу. "
+        "Команды: /help"
+    )
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Доступно:\n"
+        "• Отправь текст — получишь ответ\n"
+        "• Стикеры/голос/видео — принимаю, но не обрабатываю\n"
+        "• /start, /help"
+    )
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+
+    # Если есть OpenAI — даём «умный» ответ
+    if use_ai and ai_client:
+        try:
+            completion = ai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Кратко и по делу, по-русски."},
+                    {"role": "user", "content": text},
+                ],
+                temperature=0.6,
+                max_tokens=400,
+            )
+            answer = completion.choices[0].message.content.strip()
+        except Exception as e:
+            log.exception("OpenAI error: %s", e)
+            answer = "Не смог получить ответ от ИИ, попробуй ещё раз."
+    else:
+        # Без ИИ — простой полезный ответ (НЕ эхо)
+        answer = (
+            "Я работаю! Сейчас режим без ИИ. "
+            "Добавь переменную окружения OPENAI_API_KEY, чтобы включить умные ответы."
+        )
+
+    await update.message.reply_text(answer, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Не падаем на медиа, отвечаем мягко
+    await update.message.reply_text("Медиа получил 👍. Текстовый вопрос — в ответ дам информацию.")
+
+# Регистрируем обработчики
+application.add_handler(CommandHandler("start", start_cmd))
+application.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+application.add_handler(MessageHandler(filters.VOICE | filters.VIDEO | filters.PHOTO | filters.Document.ALL, media_handler))
+
+# ==== FastAPI ====
 app = FastAPI(title="Universal Bot")
 
-# --------- OpenAI ответ ---------
-async def ask_openai(prompt: str) -> str:
-    if not OPENAI_KEY:
-        return "OpenAI ключ не задан. Установите переменную OPENAI_API_KEY."
+@app.get("/", response_class=PlainTextResponse)
+async def root():
+    return "OK"
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": [
-            {"role": "system", "content": "Ты умный, вежливый универсальный помощник. Отвечай кратко и по делу."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.7,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(OPENAI_CHAT_URL, headers=headers, json=payload)
-        r.raise_for_status()
-        data = r.json()
-        return data["choices"][0]["message"]["content"].strip()
-
-# --------- PayPal токен ---------
-async def paypal_access_token() -> str:
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(
-            f"{PAYPAL_BASE}/v1/oauth2/token",
-            auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
-            data={"grant_type": "client_credentials"},
-        )
-        r.raise_for_status()
-        return r.json()["access_token"]
-
-# --------- Создание PayPal заказа и ссылка на оплату ---------
-async def create_paypal_order(amount: str, currency: str, chat_id: int) -> str:
-    token = await paypal_access_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    return_url = f"{PUBLIC_URL}/paypal/return?chat_id={chat_id}"
-    cancel_url = f"{PUBLIC_URL}/paypal/cancel?chat_id={chat_id}"
-
-    body = {
-        "intent": "CAPTURE",
-        "purchase_units": [{
-            "amount": {"currency_code": currency, "value": amount}
-        }],
-        "application_context": {
-            "return_url": return_url,
-            "cancel_url": cancel_url,
-            "shipping_preference": "NO_SHIPPING",
-            "user_action": "PAY_NOW"
-        }
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(f"{PAYPAL_BASE}/v2/checkout/orders", headers=headers, json=body)
-        r.raise_for_status()
-        data = r.json()
-        approve = next((l["href"] for l in data["links"] if l["rel"] == "approve"), "")
-        return approve or "Не удалось получить ссылку на оплату."
-
-# --------- CAPTURE после возврата с PayPal ---------
-async def capture_paypal_order(order_id: str) -> bool:
-    token = await paypal_access_token()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(f"{PAYPAL_BASE}/v2/checkout/orders/{order_id}/capture", headers=headers)
-        if r.status_code // 100 == 2:
-            return True
-        log.error("Capture failed: %s %s", r.status_code, r.text)
-        return False
-
-# ---------- Telegram handlers ----------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "Привет! Я универсальный бот.\n"
-        "Команды:\n"
-        "• /prices — тарифы\n"
-        "• /pay3 — оплатить 3$ (разовая)\n"
-        "• /pay27 — оплатить 27$ (безлимит месяц)\n\n"
-        "Просто задавайте вопросы на любую тему."
-    )
-    await update.message.reply_text(text)
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Спроси что угодно или используй /prices, /pay3, /pay27.")
-
-async def cmd_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Тарифы:\n"
-        "• 5 вопросов — бесплатно\n"
-        "• Разовый пакет — 3$\n"
-        "• Безлимит на месяц — 27$\n"
-        "Используй /pay3 или /pay27 для оплаты через PayPal."
-    )
-
-async def cmd_pay3(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    url = await create_paypal_order("3.00", "USD", chat_id)
-    await update.message.reply_text(f"Ссылка на оплату 3$: {url}")
-
-async def cmd_pay27(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    url = await create_paypal_order("27.00", "USD", chat_id)
-    await update.message.reply_text(f"Ссылка на оплату 27$: {url}")
-
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text.strip()
-    try:
-        reply = await ask_openai(user_text)
-    except Exception as e:
-        log.exception("OpenAI error")
-        reply = "Пока не могу ответить, попробуйте ещё раз чуть позже."
-    await update.message.reply_text(reply)
-
-application.add_handler(CommandHandler("start", cmd_start))
-application.add_handler(CommandHandler("help", cmd_help))
-application.add_handler(CommandHandler("prices", cmd_prices))
-application.add_handler(CommandHandler("pay3", cmd_pay3))
-application.add_handler(CommandHandler("pay27", cmd_pay27))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
-# ---------- FastAPI endpoints ----------
-@app.post(f"/tg/{BOT_TOKEN}")
+@app.post("/telegram")
 async def telegram_webhook(request: Request):
-    data = await request.json()
+    """Принимаем апдейты от Telegram и передаём в PTB."""
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "bad json"}, status_code=400)
+
     update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
+    await application.process_update(update)
     return JSONResponse({"ok": True})
 
-@app.get("/paypal/return")
-async def paypal_return(token: str, chat_id: Optional[int] = None):
-    ok = await capture_paypal_order(order_id=token)  # token == order_id
-    if chat_id:
-        try:
-            if ok:
-                await application.bot.send_message(chat_id, "Оплата прошла успешно ✅. Спасибо!")
-            else:
-                await application.bot.send_message(chat_id, "Не удалось подтвердить оплату ❌.")
-        except Exception:
-            pass
-    return PlainTextResponse("OK")
-
-@app.get("/paypal/cancel")
-async def paypal_cancel(chat_id: Optional[int] = None):
-    if chat_id:
-        try:
-            await application.bot.send_message(chat_id, "Оплата отменена.")
-        except Exception:
-            pass
-    return PlainTextResponse("Canceled")
-
-# ---------- Жизненный цикл PTB ----------
 @app.on_event("startup")
 async def on_startup():
+    # Запускаем PTB-приложение и ставим webhook:
     await application.initialize()
     await application.start()
-    url = f"{PUBLIC_URL}/tg/{BOT_TOKEN}"
-    await application.bot.set_webhook(url=url)
+
+    if not WEBHOOK_URL:
+        log.warning("WEBHOOK_URL не задан: вебхук не будет установлен.")
+    else:
+        url = WEBHOOK_URL.rstrip("/") + "/telegram"
+        await application.bot.set_webhook(url=url, drop_pending_updates=True)
+        log.info("Webhook set to %s", url)
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        await application.bot.delete_webhook()
+    except Exception:
+        pass
+    await application.stop()
+    await application.shutdown()
     log.info("Webhook set to %s", url)
 
 @app.on_event("shutdown")
