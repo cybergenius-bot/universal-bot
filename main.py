@@ -1,178 +1,139 @@
 import os
-import io
 import base64
-from typing import Optional
+import io
 
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
-)
-
-from pydub import AudioSegment
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
 
-# --------- ENV ----------
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-RAILWAY_URL   = os.environ["RAILWAY_URL"].rstrip("/")
+# ====== ENV ======
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")  # именно такое имя переменной в Railway
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+RAILWAY_URL = os.getenv("RAILWAY_URL")  # вида https://universal-bot-production.up.railway.app
 
-# Модель для ответов (развёрнуто)
-GPT_MODEL = "gpt-4o-mini"   # быстрая мультимодальная
-MAX_TOKENS = 1600
-TEMPERATURE = 0.8
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("TELEGRAM_TOKEN is not set in environment")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set in environment")
 
+# ====== Clients ======
 client = OpenAI(api_key=OPENAI_API_KEY)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+app = FastAPI()
 
-# --------- Telegram Application ----------
-app_tg = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# /start
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ====== Handlers ======
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я универсальный бот. Пиши текст, присылай фото, голосовые или видео — разберусь и отвечу развёрнуто."
+        "Привет! Я универсальный бот.\n"
+        "Отправь текст, фото или голосовое — отвечу.\n"
+        "Работаю по вебхуку 24/7 на Railway."
     )
 
-# Текст
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
 
-    # Развёрнутый ответ через Chat Completions
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text or ""
     resp = client.chat.completions.create(
-        model=GPT_MODEL,
-        temperature=TEMPERATURE,
-        max_tokens=MAX_TOKENS,
+        model="gpt-4o-mini",
         messages=[
             {"role": "system",
-             "content": "Отвечай развернуто, чётко по пунктам. Если просят инструкцию — дай пошагово. Язык пользователя сохраняй."},
-            {"role": "user", "content": text}
+             "content": "Отвечай развёрнуто и по делу. Если просят список — давай структурировано."},
+            {"role": "user", "content": user_text},
         ],
+        temperature=0.4,
     )
-    answer = resp.choices[0].message.content.strip()
-    await update.message.reply_text(answer)
+    await update.message.reply_text(resp.choices[0].message.content.strip())
 
-# Фото (описание/анализ изображения, решение задач с фото)
-async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg.photo:
+
+async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo:
         return
-    # Берём максимальное качество
-    file_id = msg.photo[-1].file_id
-    tg_file = await context.bot.get_file(file_id)
-    file_bytes = await tg_file.download_as_bytearray()
-
-    # Кодируем в base64 для vision
-    img_b64 = base64.b64encode(file_bytes).decode("utf-8")
-    user_hint = (msg.caption or "").strip() or "Проанализируй изображение и ответь подробно."
+    # Берём самую большую фотографию
+    photo = update.message.photo[-1]
+    tg_file = await ctx.bot.get_file(photo.file_id)
+    # Скачиваем байты
+    b = await tg_file.download_as_bytearray()
+    b64 = base64.b64encode(b).decode("utf-8")
 
     resp = client.chat.completions.create(
-        model=GPT_MODEL,
-        temperature=TEMPERATURE,
-        max_tokens=MAX_TOKENS,
+        model="gpt-4o-mini",
         messages=[
             {"role": "system",
-             "content": "Ты компьютерное зрение: поясняй подробно, если есть формулы — решай и расписывай шаги."},
-            {"role": "user",
-             "content": [
-                 {"type": "text", "text": user_hint},
-                 {"type": "image_url",
-                  "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-             ]},
+             "content": "Ты — ассистент‑визион: опиши изображение и ответь на вопрос пользователя, если он есть."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text",
+                     "text": update.message.caption or "Опиши картинку и сделай выводы, если они уместны."},
+                    {"type": "input_image",
+                     "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ],
+            },
         ],
     )
-    answer = resp.choices[0].message.content.strip()
-    await msg.reply_text(answer)
+    await update.message.reply_text(resp.choices[0].message.content.strip())
 
-# Голосовое → распознаём → даём развёрнутый ответ
-async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not update.message.voice:
+        return
     voice = update.message.voice
-    tg_file = await context.bot.get_file(voice.file_id)
+    tg_file = await ctx.bot.get_file(voice.file_id)
     ogg_bytes = await tg_file.download_as_bytearray()
 
-    # В wav для Whisper
-    audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
-    wav_buf = io.BytesIO()
-    audio.export(wav_buf, format="wav")
-    wav_buf.seek(0)
-
-    # Распознаём
-    transcription = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=("audio.wav", wav_buf, "audio/wav")
+    # Передаём .ogg напрямую в OpenAI (без ffmpeg/pydub)
+    file_tuple = ("voice.ogg", io.BytesIO(ogg_bytes), "audio/ogg")
+    tr = client.audio.transcriptions.create(
+        model="gpt-4o-mini-transcribe",
+        file=file_tuple,
+        response_format="verbose_json",
     )
-    text = transcription.text.strip()
+    text = tr.text.strip() if hasattr(tr, "text") else str(tr)
 
-    # Отвечаем на распознанный текст
+    # Отвечаем содержательно на то, что сказали голосом
     resp = client.chat.completions.create(
-        model=GPT_MODEL,
-        temperature=TEMPERATURE,
-        max_tokens=MAX_TOKENS,
+        model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Отвечай развернуто, дружелюбно и по существу."},
-            {"role": "user", "content": text},
+            {"role": "system",
+             "content": "Отвечай развёрнуто и дружелюбно"},
+            {"role": "user", "content": f"Пользователь сказал голосом: «{text}». Дай полезный ответ."},
         ],
+        temperature=0.5,
     )
-    answer = resp.choices[0].message.content.strip()
-    await update.message.reply_text(f"Вы сказали: {text}\n\nОтвет:\n{answer}")
+    await update.message.reply_text(resp.choices[0].message.content.strip())
 
-# Видео → берём аудио-дорожку → распознаём → отвечаем
-async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    video = update.message.video
-    tg_file = await context.bot.get_file(video.file_id)
-    mp4_bytes = await tg_file.download_as_bytearray()
 
-    # Извлекаем аудио (через pydub требуется ffmpeg)
-    video_audio = AudioSegment.from_file(io.BytesIO(mp4_bytes), format="mp4")
-    wav_buf = io.BytesIO()
-    video_audio.export(wav_buf, format="wav")
-    wav_buf.seek(0)
+# ====== Telegram webhook endpoint ======
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    transcription = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=("audio.wav", wav_buf, "audio/wav")
-    )
-    text = transcription.text.strip()
-
-    resp = client.chat.completions.create(
-        model=GPT_MODEL,
-        temperature=TEMPERATURE,
-        max_tokens=MAX_TOKENS,
-        messages=[
-            {"role": "system", "content": "Отвечай подробно. Если просят конспект видео — дай тезисы и выводы."},
-            {"role": "user", "content": text},
-        ],
-    )
-    answer = resp.choices[0].message.content.strip()
-    await update.message.reply_text(f"Из видео распознано: {text}\n\nОтвет:\n{answer}")
-
-# Регистрируем хендлеры
-app_tg.add_handler(CommandHandler("start", cmd_start))
-app_tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-app_tg.add_handler(MessageHandler(filters.PHOTO, on_photo))
-app_tg.add_handler(MessageHandler(filters.VOICE, on_voice))
-app_tg.add_handler(MessageHandler(filters.VIDEO, on_video))
-
-# --------- FastAPI + Webhook ----------
-fastapi_app = FastAPI()
-
-@fastapi_app.get("/")
-async def health():
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
     return {"ok": True}
 
-@fastapi_app.on_event("startup")
+
+# ====== FastAPI lifecycle ======
+@app.on_event("startup")
 async def on_startup():
-    # инициализируем PTB и ставим вебхук
-    await app_tg.initialize()
-    await app_tg.bot.set_webhook(f"{RAILWAY_URL}/webhook/{TELEGRAM_TOKEN}")
+    # Регистрируем обработчики
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-@fastapi_app.on_event("shutdown")
-async def on_shutdown():
-    await app_tg.shutdown()
-    await app_tg.stop()
+    # Ставим вебхук (если указан URL)
+    if RAILWAY_URL:
+        await application.bot.set_webhook(url=f"{RAILWAY_URL}/webhook")
 
-@fastapi_app.post(f"/webhook/{TELEGRAM_TOKEN}")
-async def webhook(request: Request):
-    try:
+
+# Локальный запуск (polling) — на Railway это не используется
+if __name__ == "__main__":
+    application.run_polling()
         data = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
