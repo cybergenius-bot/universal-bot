@@ -1,160 +1,164 @@
 import os
 import io
-import base64
-import logging
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Optional
+
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application, ApplicationBuilder, CommandHandler,
+    MessageHandler, ContextTypes, filters
 )
 
-from openai import OpenAI
-
-# ---------- настройки и клиенты ----------
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("universal-bot")
-
+# ==== ENV ====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # пример: https://universal-bot-production.up.railway.app/webhook
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # опционально
+# PUBLIC_URL: можно задать вручную в переменных Railway.
+# Если не указан, пробуем домен, который выставляет Railway.
+PUBLIC_URL = (
+    os.getenv("PUBLIC_URL")
+    or (f"https://{os.getenv('RAILWAY_PUBLIC_DOMAIN')}" if os.getenv("RAILWAY_PUBLIC_DOMAIN") else None)
+)
 
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is empty")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is empty")
-if not WEBHOOK_URL:
-    raise RuntimeError("WEBHOOK_URL is empty")
+    raise RuntimeError("TELEGRAM_TOKEN is not set")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ==== OpenAI (опционально) ====
+openai_client = None
+if OPENAI_API_KEY:
+    try:
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception:
+        openai_client = None  # если библиотека не установлена — просто игнорируем
 
-# Telegram Application (PTB v20+)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
+# ==== Telegram Application ====
+application: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-# FastAPI app
-api = FastAPI(title="Universal Bot")
-
-# ---------- обработчики ----------
+# ===== Handlers =====
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я универсальный бот.\n"
-        "📝 Напиши вопрос — отвечу.\n"
-        "🎙️ Запиши голос — расшифрую и отвечу.\n"
-        "🖼️ Пришли фото — опишу, что на нём."
+        "Привет! Я универсальный бот. Спроси о чем угодно.\n"
+        "Могу понимать текст и голосовые сообщения."
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text[:4000]
+    text = (update.message.text or "").strip()
 
-    reply = client.chat.completions.create(
-        model="gpt-4o-mini",  # быстрый и недорогой
-        messages=[
-            {"role": "system", "content": "Ты helpful ассистент. Отвечай кратко и по делу."},
-            {"role": "user", "content": user_text}
-        ],
-        temperature=0.6,
-    )
-    answer = reply.choices[0].message.content.strip()
-    await update.message.reply_text(answer)
+    # Если есть ключ OpenAI — просим ИИ ответить «по‑умному»
+    if openai_client:
+        try:
+            resp = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Отвечай кратко, понятно и по делу, на русском."},
+                    {"role": "user", "content": text},
+                ],
+            )
+            answer = resp.choices[0].message.content.strip()
+            await update.message.reply_text(answer)
+            return
+        except Exception as e:
+            # Если что-то пошло не так — не молчим
+            await update.message.reply_text(f"Ответил бы умно, но возникла ошибка ИИ: {e}\nОтвечаю сам.")
+
+    # Фолбэк — просто эхо с пометкой
+    await update.message.reply_text(f"Ты написал: {text}")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # скачиваем OGG/OPUS
-    voice = update.message.voice
-    tg_file = await context.bot.get_file(voice.file_id)
-    bio = io.BytesIO()
-    await tg_file.download_to_memory(out=bio)
-    bio.seek(0)
+    """Скачиваем голосовое, отправляем в Whisper, отвечаем расшифровкой и ответом ИИ (если есть)."""
+    try:
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        bio = io.BytesIO()
+        await file.download_to_memory(out=bio)
+        bio.seek(0)
 
-    # транскрипция (Whisper)
-    transcript = client.audio.transcriptions.create(
-        model="whisper-1",
-        file=("voice.ogg", bio, "audio/ogg")
-    )
-    text = transcript.text.strip()
-    if not text:
-        await update.message.reply_text("Не смог распознать голос 😕")
-        return
+        transcript_text = None
+        if openai_client:
+            try:
+                tr = openai_client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=("voice.ogg", bio, "audio/ogg")
+                )
+                transcript_text = tr.text.strip() if hasattr(tr, "text") else None
+            except Exception as e:
+                transcript_text = None
+                await update.message.reply_text(f"Не удалось расшифровать голос: {e}")
 
-    # ответ на распознанный текст
-    reply = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Ты helpful ассистент. Отвечай кратко и по делу."},
-            {"role": "user", "content": text}
-        ],
-        temperature=0.6,
-    )
-    answer = reply.choices[0].message.content.strip()
-    await update.message.reply_text(f"🗣️ Распознал: {text}\n\n💬 Ответ: {answer}")
+        if transcript_text:
+            # Если удалось расшифровать — отвечаем содержательно
+            if openai_client:
+                try:
+                    resp = openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "Отвечай кратко, понятно и по делу, на русском."},
+                            {"role": "user", "content": transcript_text},
+                        ],
+                    )
+                    answer = resp.choices[0].message.content.strip()
+                    await update.message.reply_text(f"Вы сказали: {transcript_text}\n\nОтвет: {answer}")
+                    return
+                except Exception as e:
+                    await update.message.reply_text(f"Ошибка при ответе ИИ: {e}\nВы сказали: {transcript_text}")
+                    return
+            # Если OpenAI нет — просто отдать расшифровку
+            await update.message.reply_text(f"Вы сказали: {transcript_text}")
+        else:
+            await update.message.reply_text("Не смог распознать голос. Попробуй ещё раз.")
+    except Exception as e:
+        await update.message.reply_text(f"Не получилось обработать голосовое: {e}")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # берём самую большую версию фото
-    photo = update.message.photo[-1]
-    tg_file = await context.bot.get_file(photo.file_id)
-    bio = io.BytesIO()
-    await tg_file.download_to_memory(out=bio)
-    bio.seek(0)
-    b64 = base64.b64encode(bio.read()).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{b64}"
-
-    # визуальный анализ через multimodal
-    reply = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Ты описываешь изображения кратко и информативно."},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Опиши это фото и добавь полезные детали."},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            },
-        ],
-        temperature=0.4,
-    )
-    caption = reply.choices[0].message.content.strip()
-    await update.message.reply_text(caption or "Не смог ничего описать 😕")
-
-async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    log.exception("Unhandled error: %s", context.error)
-
-# регистрируем хендлеры
+# Регистрируем обработчики
 application.add_handler(CommandHandler("start", cmd_start))
 application.add_handler(MessageHandler(filters.VOICE, handle_voice))
-application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-application.add_error_handler(handle_error)
 
-# ---------- вебхук и lifecycle ----------
+# ===== FastAPI + lifespan =====
 
-@api.get("/")
-async def root():
-    return {"ok": True, "service": "universal-bot"}
-
-@api.post("/webhook")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return JSONResponse({"ok": True})
-
-@api.on_event("startup")
-async def _on_startup():
-    # ВАЖНО: корректно запустить PTB перед установкой вебхука
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup
     await application.initialize()
     await application.start()
-    await application.bot.set_webhook(WEBHOOK_URL)
-    log.info("Webhook set to %s", WEBHOOK_URL)
 
-@api.on_event("shutdown")
-async def _on_shutdown():
-    # Снять вебхук и корректно остановить PTB
+    # Ставим вебхук, если известен публичный URL
+    if PUBLIC_URL:
+        webhook_url = f"{PUBLIC_URL.rstrip('/')}/webhook/{TELEGRAM_TOKEN}"
+        try:
+            await application.bot.set_webhook(webhook_url, allowed_updates=["message"])
+        except Exception:
+            # если не удалось — оставим без вебхука (можно будет поставить вручную)
+            pass
+
+    yield  # здесь приложение работает
+
+    # shutdown
     try:
         await application.bot.delete_webhook()
     except Exception:
         pass
     await application.stop()
     await application.shutdown()
+
+api = FastAPI(title="Universal Bot", lifespan=lifespan)
+
+@api.get("/")
+async def root():
+    return PlainTextResponse("OK")
+
+@api.post("/webhook/{token}")
+async def telegram_webhook(token: str, request: Request):
+    if token != TELEGRAM_TOKEN:
+        return JSONResponse({"ok": False, "error": "bad token"}, status_code=403)
+
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return JSONResponse({"ok": True})
     log.info("Bot stopped gracefully")
