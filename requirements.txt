@@ -17,5 +17,3 @@ requests==2.32.3
 pillow==10.4.0
 ffmpeg-python==0.2.0
 python-multipart==0.0.9
-ffmpeg-python==0.2.0
-python-multipart==0.0.9
