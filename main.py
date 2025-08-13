@@ -1,45 +1,84 @@
+# main.py
 import os
-import asyncio
+import logging
+from typing import Final
+
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+log = logging.getLogger("universal-bot")
 
-# ====== Хендлеры ======
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Я универсальный бот на webhook. Напиши мне что‑нибудь 👋"
-    )
+# --- ENV ---
+TOKEN: Final[str] = os.getenv("TELEGRAM_TOKEN", "")
+if not TOKEN:
+    raise RuntimeError("No TELEGRAM_TOKEN provided")
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Пока просто эхо, чтобы проверить стабильность webhook.
-    # Позже сюда добавим ИИ‑ответы, фото/видео, оплату и т.д.
+# Для Railway:
+PORT: int = int(os.getenv("PORT", "8080"))
+
+# Вставь сюда полный публичный URL сервиса Railway (без завершающего /),
+# например: https://universal-bot-production.up.railway.app
+WEBHOOK_BASE: str = os.getenv("WEBHOOK_URL", "").rstrip("/")
+
+# Секретный путь вебхука (можно оставить по умолчанию)
+WEBHOOK_PATH: str = os.getenv("WEBHOOK_PATH", "webhook")
+
+# --- HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Бот запущен ✅\nПиши обычный текст — отвечу.")
+
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Пока для проверки — просто эхо.
+    # (Позже сюда подключим ИИ‑ответы, фото/видео и т.д.)
     text = update.message.text or ""
     await update.message.reply_text(f"Ты написал: {text}")
 
-# ====== Запуск приложения с webhook ======
-async def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # Регистрируем хендлеры
+def build_app() -> Application:
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+    return app
 
-    # Порт Railway
-    port = int(os.environ.get("PORT", 8000))
+async def main_async() -> None:
+    app = build_app()
 
-    # Твой публичный URL для webhook (добавим в переменные Railway)
-    webhook_url = os.environ["WEBHOOK_URL"]  # например: https://universal-bot-production.up.railway.app/telegram
+    if WEBHOOK_BASE:
+        # Вебхук режим (Railway)
+        webhook_url = f"{WEBHOOK_BASE}/{WEBHOOK_PATH}"
+        log.info("Setting webhook to %s", webhook_url)
+        await app.bot.set_webhook(webhook_url)
 
-    # Запускаем встроенный aiohttp‑сервер и одновременно ставим webhook в Telegram
-    await app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        webhook_url=webhook_url,
-        drop_pending_updates=True,
-    )
+        # PTB сам поднимет aiohttp‑сервер на указанном пути
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        # Поллинг (на всякий случай)
+        await app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+
+    try:
+        asyncio.run(main_async())
+    except RuntimeError as e:
+        # Обход "Cannot close a running event loop" (особенности окружения)
+        if "Cannot close a running event loop" in str(e):
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(main_async())
+        else:
+            raise
