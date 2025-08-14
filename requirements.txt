@@ -1,6 +1,9 @@
 python-telegram-bot==21.4
-fastapi==0.110.0
-uvicorn==0.29.0
-ffmpeg-python==0.2.0
-openai==1.30.0
-requests==2.31.0
+requests
+ffmpeg-python
+openai
+pydub
+aiohttp
+uvicorn
+fastapi
+python-dotenv
