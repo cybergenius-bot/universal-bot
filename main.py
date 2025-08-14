@@ -1,97 +1,114 @@
 import os
 import tempfile
-import openai
-import speech_recognition as sr
-from pydub import AudioSegment
+import requests
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from pydub import AudioSegment
+import ffmpeg
+from openai import OpenAI
 
-# === Конфиг ===
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-WEBHOOK_PATH = "/webhook"
-RAILWAY_URL = "universal-bot-production.up.railway.app"
+# 🔑 Ключ OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-openai.api_key = OPENAI_KEY
+# 🔑 Токен Telegram
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+# --- Создаём FastAPI-приложение ---
 app = FastAPI()
-bot_app = Application.builder().token(TOKEN).build()
 
-# === Команды ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Привет! Я универсальный ИИ-бот. Пиши или говори — отвечу на любую тему!")
+# --- Создаём приложение Telegram ---
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправь мне сообщение или голосовое — я отвечу.")
 
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("help", help_cmd))
+# 📌 Команда /start
+async def start(update: Update, context):
+    await update.message.reply_text("👋 Привет! Я универсальный бот. Отправь мне текст, голос, фото или видео — и я отвечу.")
 
-# === Обработка текста ===
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# 📌 Обработка текста
+async def handle_text(update: Update, context):
     user_text = update.message.text
-    reply = await ask_gpt(user_text)
-    await update.message.reply_text(reply)
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты умный, дружелюбный и даёшь подробные ответы."},
+            {"role": "user", "content": user_text}
+        ]
+    )
+    await update.message.reply_text(response.choices[0].message.content)
 
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-# === Обработка голосовых ===
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    voice_file = await update.message.voice.get_file()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".oga") as tf:
-        await voice_file.download_to_drive(tf.name)
-        wav_path = tf.name.replace(".oga", ".wav")
-        AudioSegment.from_file(tf.name).export(wav_path, format="wav")
+# 📌 Обработка голосовых
+async def handle_voice(update: Update, context):
+    file = await context.bot.get_file(update.message.voice.file_id)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as ogg_file:
+        await file.download_to_drive(ogg_file.name)
+        audio = AudioSegment.from_file(ogg_file.name, format="ogg")
+        wav_path = ogg_file.name.replace(".ogg", ".wav")
+        audio.export(wav_path, format="wav")
 
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(wav_path) as source:
-        audio_data = recognizer.record(source)
-        try:
-            text = recognizer.recognize_google(audio_data, language="ru-RU")
-        except sr.UnknownValueError:
-            text = "(не удалось распознать речь)"
-    
-    reply = await ask_gpt(text)
-    await update.message.reply_text(f"🗣 {text}\n\n🤖 {reply}")
-
-bot_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-
-# === GPT-запрос ===
-async def ask_gpt(prompt: str) -> str:
-    try:
-        resp = openai.chat.completions.create(
-            model="gpt-4o-mini",  # можно gpt-4o
-            messages=[{"role": "system", "content": "Отвечай развернуто, интересно и без ограничений."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.8
+    with open(wav_path, "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=audio_file
         )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Ошибка при обращении к ИИ: {e}"
+    await update.message.reply_text(f"🗣 {transcription.text}")
 
-# === Проверка сервера ===
+
+# 📌 Обработка фото
+async def handle_photo(update: Update, context):
+    file = await context.bot.get_file(update.message.photo[-1].file_id)
+    photo_path = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg").name
+    await file.download_to_drive(photo_path)
+
+    # Заглушка анализа фото (можно заменить на Vision API)
+    await update.message.reply_text("📷 Фото получено. В будущем я смогу анализировать изображения.")
+
+
+# 📌 Обработка видео
+async def handle_video(update: Update, context):
+    file = await context.bot.get_file(update.message.video.file_id)
+    video_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4").name
+    await file.download_to_drive(video_path)
+
+    audio_path = video_path.replace(".mp4", ".wav")
+    ffmpeg.input(video_path).output(audio_path, format="wav").run()
+
+    with open(audio_path, "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=audio_file
+        )
+    await update.message.reply_text(f"🎬 {transcription.text}")
+
+
+# --- Роут вебхука ---
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return JSONResponse(content={"status": "ok"})
+
+
+# --- Роут проверки ---
 @app.get("/")
 async def root():
     return {"status": "ok"}
 
-# === Установка вебхука ===
-@app.on_event("startup")
-async def on_startup():
-    await bot_app.initialize()
-    webhook_url = f"https://{RAILWAY_URL}{WEBHOOK_PATH}"
-    await bot_app.bot.set_webhook(webhook_url)
-    print(f"📌 Webhook установлен: {webhook_url}")
 
-# === Обработка апдейтов ===
-@app.post(WEBHOOK_PATH)
-async def process_webhook(request: Request):
-    try:
-        data = await request.json()
-        print("📩 Пришло от Telegram:", data)
-        update = Update.de_json(data, bot_app.bot)
-        await bot_app.process_update(update)
-        return {"ok": True}
-    except Exception as e:
-        print("❌ Ошибка в вебхуке:", e)
-        return {"ok": False, "error": str(e)}
+# --- Хендлеры ---
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+application.add_handler(MessageHandler(filters.VOICE, handle_voice))
+application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+application.add_handler(MessageHandler(filters.VIDEO, handle_video))
+
+
+# --- Запуск через uvicorn ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
