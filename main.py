@@ -1,32 +1,17 @@
-import os
-from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-app = FastAPI()
-bot_app = Application.builder().token(TOKEN).build()
+# 🔹 Вставь сюда токен, который дал BotFather (без пробелов, без кавычек вокруг)
+TOKEN = "ТВОЙ_ТОКЕН"
 
 # Команда /start
-async def start(update: Update, context):
-    await update.message.reply_text("✅ Бот работает! Напиши что-нибудь.")
+async def start(update, context):
+    await update.message.reply_text("Привет! ✅ Бот запущен и работает в polling-режиме.")
 
-# Ответ на любое сообщение
-async def echo(update: Update, context):
-    await update.message.reply_text(f"Ты написал: {update.message.text}")
+# Главная функция
+def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.run_polling()
 
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.process_update(update)
-    return {"status": "ok"}
-
-@app.on_event("startup")
-async def startup_event():
-    print("🚀 Бот запущен!")
-
+if __name__ == "__main__":
+    main()
