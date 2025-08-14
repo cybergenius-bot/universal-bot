@@ -1,27 +1,33 @@
+import os
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application
-
-import os
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-RAILWAY_URL = os.getenv("RAILWAY_URL")
+WEBHOOK_PATH = "/webhook"
 
 app = FastAPI()
 bot_app = Application.builder().token(TOKEN).build()
 
-@app.post(f"/{WEBHOOK_SECRET}")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.process_update(update)
-    return {"status": "ok"}
+# /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Бот запущен и работает!")
+
+# /help
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Доступные команды: /start, /help")
+
+bot_app.add_handler(CommandHandler("start", start))
+bot_app.add_handler(CommandHandler("help", help_cmd))
 
 @app.on_event("startup")
 async def on_startup():
-    await bot_app.bot.set_webhook(f"{RAILWAY_URL}/{WEBHOOK_SECRET}")
+    webhook_url = f"{os.getenv('RAILWAY_STATIC_URL')}{WEBHOOK_PATH}"
+    await bot_app.bot.set_webhook(webhook_url)
 
-@bot_app.message_handler()
-async def echo(update: Update, context):
-    await update.message.reply_text("Бот работает! 🚀")
+@app.post(WEBHOOK_PATH)
+async def process_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return {"ok": True}
