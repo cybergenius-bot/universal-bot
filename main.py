@@ -3,9 +3,10 @@ from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Получаем токен и домен из переменных окружения
+# Токен бота
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")  # Railway сам задаёт этот домен
+# Твой Railway-домен
+RAILWAY_URL = "universal-bot-production.up.railway.app"
 WEBHOOK_PATH = "/webhook"
 
 app = FastAPI()
@@ -27,7 +28,7 @@ bot_app.add_handler(CommandHandler("help", help_cmd))
 async def on_startup():
     # Формируем полный URL вебхука
     webhook_url = f"https://{RAILWAY_URL}{WEBHOOK_PATH}"
-    # Устанавливаем вебхук в Telegram
+    # Ставим вебхук в Telegram
     await bot_app.bot.set_webhook(webhook_url)
     print(f"📌 Webhook установлен: {webhook_url}")
 
@@ -37,3 +38,4 @@ async def process_webhook(request: Request):
     update = Update.de_json(data, bot_app.bot)
     await bot_app.process_update(update)
     return {"ok": True}
+
