@@ -1,9 +1,9 @@
 python-telegram-bot==21.4
+fastapi
+uvicorn
 requests
 ffmpeg-python
-openai
+langdetect
 pydub
-aiohttp
-uvicorn
-fastapi
-python-dotenv
+Pillow
+openai
