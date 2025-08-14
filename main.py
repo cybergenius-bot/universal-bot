@@ -1,82 +1,65 @@
 import os
-import asyncio
-from typing import Optional
-
+import tempfile
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application, MessageHandler, CommandHandler, ContextTypes, filters
 )
+from pydub import AudioSegment
 
-# ==== ENV ====
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")              # токен бота от @BotFather
-RAILWAY_URL    = os.getenv("RAILWAY_URL")                 # https://universal-bot-production.up.railway.app
-WEBHOOK_PATH   = f"/webhook/{TELEGRAM_TOKEN}"
-WEBHOOK_URL    = f"{RAILWAY_URL.rstrip('/')}{WEBHOOK_PATH}"
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]                 # токен бота
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "123-ABC")  # секрет в URL
+# При желании добавишь OPENAI_API_KEY и т.п.
 
-if not TELEGRAM_TOKEN or not RAILWAY_URL:
-    raise RuntimeError("Нет TELEGRAM_TOKEN или RAILWAY_URL в переменных окружения")
+app = FastAPI(title="Universal Bot")
 
-# ==== Telegram Application ====
-application: Application = Application.builder().token(TELEGRAM_TOKEN).build()
+# --- Telegram Application (без polling, только webhook) ---
+tg = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Команды
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот работает. Пиши текст, пришли фото или голос.")
+# Команда /start — проверка, что ответы идут
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Я на Railway по веб-хуку ✅")
 
-# Текст
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-    await update.message.reply_text(f"Принял текст: «{text}». Базовый ответ — всё ок ✅")
+# Эхо текста (для проверки цепочки)
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Получил: {update.message.text}")
 
-# Фото
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📷 Фото получил. Анализ пока выключен — но событие ловится ✅")
+# Фото — просто подтверждаем и показываем URL файла Telegram
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = await update.message.photo[-1].get_file()
+    await update.message.reply_text(f"Фото получено. URL: {file.file_path}")
 
-# Голос
-async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎤 Голос получил. Распознавание подключим на следующем шаге ✅")
+# Голос — конвертация .ogg -> .mp3 (через pydub + imageio-ffmpeg)
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    voice = update.message.voice
+    t_ogg = tempfile.mktemp(suffix=".ogg")
+    t_mp3 = tempfile.mktemp(suffix=".mp3")
+    tg_file = await voice.get_file()
+    await tg_file.download_to_drive(t_ogg)
+    AudioSegment.from_file(t_ogg).export(t_mp3, format="mp3")
+    await update.message.reply_text("Голосовое получено и сконвертировано в mp3 ✅")
 
-# Фоллбек
-async def anything_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("Я получил сообщение. Базовый хендлер сработал ✅")
+# Регистрируем обработчики
+tg.add_handler(CommandHandler("start", cmd_start))
+tg.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+tg.add_handler(MessageHandler(filters.PHOTO, on_photo))
+tg.add_handler(MessageHandler(filters.VOICE, on_voice))
 
-# Регистрируем хендлеры
-application.add_handler(CommandHandler("start", start_cmd))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-application.add_handler(MessageHandler(filters.VOICE, voice_handler))
-application.add_handler(MessageHandler(filters.ALL, anything_handler))
-
-# ==== FastAPI ====
-app = FastAPI()
-
-@app.on_event("startup")
-async def on_startup():
-    # ВАЖНО: корректная инициализация для webhook-режима
-    await application.initialize()
-    # Чистим старый вебхук и выставляем новый
-    await application.bot.delete_webhook(drop_pending_updates=True)
-    await application.bot.set_webhook(url=WEBHOOK_URL)
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    # Корректно закрываем application
-    await application.shutdown()
-    await application.stop()
-
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    update = Update.de_json(data, application.bot)
-    # Обрабатываем апдейт без запуска polling
-    await application.process_update(update)
+# --- FastAPI маршруты ---
+@app.get("/health")
+def health():
     return {"ok": True}
 
-@app.get("/")
-async def health():
-    return {"status": "ok", "webhook": WEBHOOK_URL}
+@app.post("/webhook/{secret}")
+async def webhook(secret: str, request: Request):
+    if secret != WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="bad secret")
+    data = await request.json()
+    update = Update.de_json(data, tg.bot)
+    await tg.process_update(update)
+    return {"ok": True}
+
+# Инициализация PTB один раз (без polling!)
+@app.on_event("startup")
+async def on_startup():
+    await tg.initialize()
