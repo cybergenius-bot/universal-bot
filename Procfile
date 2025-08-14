@@ -1,2 +1,2 @@
-uvicorn main:app --host --port 10000
+uvicorn main:app --port 10000
 
