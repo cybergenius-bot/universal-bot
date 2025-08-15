@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, Request
 import requests
 
-TOKEN = os.getenv("BOT_TOKEN")  # Токен из переменных окружения Railway
+TOKEN = os.getenv("BOT_TOKEN")  # Токен берем из переменных окружения Railway
 TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
 app = FastAPI()
@@ -29,4 +29,3 @@ async def webhook(token: str, request: Request):
         })
 
     return {"ok": True}
-После этого:
