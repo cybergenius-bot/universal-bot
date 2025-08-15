@@ -6,30 +6,29 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не установлен")
 
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI()
 
-# Webhook endpoint
+@app.get("/")
+def home():
+    return {"status": "ok"}
+
 @app.post(f"/webhook/{BOT_TOKEN}")
-async def webhook_handler(request: Request):
+async def webhook(request: Request):
     data = await request.json()
-    if "message" in data and "text" in data["message"]:
+    print(data)  # Чтобы в логах видеть входящие сообщения
+
+    if "message" in data:
         chat_id = data["message"]["chat"]["id"]
-        text = data["message"]["text"]
+        text = data["message"].get("text", "")
 
         if text == "/start":
-            send_message(chat_id, "Бот запущен и готов работать ✅")
+            send_message(chat_id, "✅ Бот запущен!")
         else:
             send_message(chat_id, f"Вы написали: {text}")
 
     return {"ok": True}
 
 def send_message(chat_id, text):
-    url = f"{TELEGRAM_API_URL}/sendMessage"
-    requests.post(url, json={"chat_id": chat_id, "text": text})
-
-# Root for health check
-@app.get("/")
-def home():
-    return {"status": "ok"}
+    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
