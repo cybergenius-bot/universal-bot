@@ -1,37 +1,33 @@
-# main.py
-from fastapi import FastAPI, Request
 import os
+from fastapi import FastAPI, Request
 import requests
 
-# Загружаем токен из переменных окружения Railway
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN не найден в переменных окружения!")
+TOKEN = os.getenv("BOT_TOKEN")  # токен берем из переменных окружения Railway
+TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
-API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
-# Создаём приложение FastAPI
 app = FastAPI()
 
+
 @app.get("/")
-async def root():
-    return {"status": "Bot is running"}
+def home():
+    return {"status": "ok"}
+
 
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
-    if token != TELEGRAM_TOKEN:
-        return {"ok": False, "error": "Invalid token in URL"}
-    
-    data = await request.json()
+    if token != TOKEN:
+        return {"ok": False, "error": "Invalid token"}
 
-    # Если пришло сообщение от пользователя
-    if "message" in data:
+    data = await request.json()
+    print("Incoming update:", data)
+
+    # Обработка текстовых сообщений
+    if "message" in data and "text" in data["message"]:
         chat_id = data["message"]["chat"]["id"]
-        text_in = data["message"].get("text", "")
-        
-        # Ответ пользователю
-        reply_text = f"Вы написали: {text_in}"
-        requests.post(f"{API_URL}/sendMessage", json={
+        text = data["message"]["text"]
+
+        reply_text = f"Вы написали: {text}"
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={
             "chat_id": chat_id,
             "text": reply_text
         })
