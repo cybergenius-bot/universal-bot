@@ -1,53 +1,46 @@
 import os
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-import asyncio
+from telegram.ext import Application, CommandHandler
+import logging
 
-# Загружаем переменные окружения
-TOKEN = os.getenv("BOT_TOKEN")
-RAILWAY_URL = os.getenv("RAILWAY_URL")
+# Логи для отладки
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-if not TOKEN:
-    raise ValueError("❌ Переменная BOT_TOKEN не задана!")
-if not RAILWAY_URL:
-    raise ValueError("❌ Переменная RAILWAY_URL не задана!")
+# Переменные окружения
+TOKEN = os.getenv("BOT_TOKEN")  # Токен бота из Railway Variables
+RAILWAY_URL = os.getenv("RAILWAY_URL")  # Например: https://universal-bot-production.up.railway.app
 
 # Создаём приложение Telegram
 application = Application.builder().token(TOKEN).build()
 
-# Команды бота
-async def start(update: Update, context):
-    await update.message.reply_text("✅ Привет! Бот запущен и готов к работе.")
-
-async def echo(update: Update, context):
-    await update.message.reply_text(update.message.text)
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-# Создаём FastAPI
+# Создаём FastAPI сервер
 app = FastAPI()
 
-@app.on_event("startup")
-async def on_startup():
-    await application.bot.set_webhook(f"{RAILWAY_URL}/webhook/{TOKEN}")
-    print(f"✅ Webhook установлен: {RAILWAY_URL}/webhook/{TOKEN}")
+# Команда /start
+async def start(update: Update, context):
+    await update.message.reply_text("✅ Бот запущен и готов к работе!")
 
-@app.post("/webhook/{token}")
-async def webhook(token: str, request: Request):
-    if token != TOKEN:
-        return {"status": "forbidden"}
+application.add_handler(CommandHandler("start", start))
+
+# При старте сервера
+@app.on_event("startup")
+async def startup_event():
+    await application.initialize()
+    webhook_url = f"{RAILWAY_URL}/webhook/{TOKEN}"
+    await application.bot.set_webhook(webhook_url)
+    logger.info(f"✅ Webhook установлен: {webhook_url}")
+
+# Обработка вебхуков
+@app.post(f"/webhook/{TOKEN}")
+async def webhook_handler(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
-    await application.update_queue.put(update)
-    return {"status": "ok"}
+    await application.process_update(update)
+    return {"ok": True}
 
-@app.get("/")
-async def home():
-    return {"status": "бот работает"}
-
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+# При завершении работы
+@app.on_event("shutdown")
+async def shutdown_event():
+    await application.shutdown()
