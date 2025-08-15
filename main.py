@@ -1,47 +1,41 @@
 import os
+import logging
 from fastapi import FastAPI, Request
+from telegram.ext import ApplicationBuilder
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
-TOKEN = os.getenv("TOKEN")
-if not TOKEN:
-    raise ValueError("❌ Не найден TOKEN в переменных окружения Railway!")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+TOKEN = os.getenv("TOKEN")  # В Railway в переменных окружения
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}{WEBHOOK_PATH}"
 
 app = FastAPI()
+
+# Создаём приложение Telegram
 application = ApplicationBuilder().token(TOKEN).build()
 
-# Команда /start
+# Простой обработчик для теста
 async def start(update: Update, context):
-    await update.message.reply_text("Привет! Бот работает ✅")
-
-# Ответ на любое сообщение
-async def echo(update: Update, context):
-    await update.message.reply_text(f"Вы написали: {update.message.text}")
+    await update.message.reply_text("Бот работает!")
 
 application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# Обработка вебхука
-@app.post("/webhook")
-async def webhook(request: Request):
+@app.on_event("startup")
+async def on_startup():
+    logger.info(f"Запуск бота, установка вебхука: {WEBHOOK_URL}")
+    await application.bot.set_webhook(WEBHOOK_URL)
+    await application.start()
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Остановка бота...")
+    await application.stop()
+
+@app.post(WEBHOOK_PATH)
+async def webhook_handler(request: Request):
     data = await request.json()
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return {"ok": True}
-
-# Проверка
-@app.get("/")
-def home():
-    return {"status": "Бот запущен ✅"}
-3. Файл run.py
-python
-Копировать
-Редактировать
-import os
-import uvicorn
-from main import app
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
