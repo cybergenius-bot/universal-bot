@@ -1,54 +1,49 @@
 import os
 import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import requests
+from fastapi import FastAPI, Request
+from telegram.ext import ApplicationBuilder, CommandHandler
 
-# =====================
-# Настройки
-# =====================
-TOKEN = os.getenv("BOT_TOKEN")  # Токен берём из переменной окружения на Railway
-WEBHOOK_URL = f"https://universal-bot-production.up.railway.app/webhook"  # Твой домен Railway
-
-# =====================
-# Логирование
-# =====================
+# Логи, чтобы видеть что происходит
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# =====================
-# Команды бота
-# =====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Бот работает через вебхук 🚀")
+# Читаем токен из переменных окружения Railway
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise ValueError("❌ Не найден TOKEN в переменных окружения Railway!")
 
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(update.message.text)
+# Создаём приложение Telegram
+application = ApplicationBuilder().token(TOKEN).build()
 
-# =====================
-# Основной запуск
-# =====================
-def main():
-    # 1. Устанавливаем вебхук на Telegram API
-    r = requests.get(f"https://api.telegram.org/bot{TOKEN}/setWebhook?url={WEBHOOK_URL}")
-    logging.info(f"Webhook set result: {r.json()}")
+# Простой тест-командой
+async def start(update, context):
+    await update.message.reply_text("✅ Бот запущен и работает!")
 
-    # 2. Создаём приложение
-    application = ApplicationBuilder().token(TOKEN).updater(None).build()
+application.add_handler(CommandHandler("start", start))
 
-    # 3. Регистрируем команды
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+# FastAPI сервер
+app = FastAPI()
 
-    # 4. Запускаем Webhook сервер
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        url_path="webhook",
-        webhook_url=WEBHOOK_URL
-    )
+@app.on_event("startup")
+async def startup_event():
+    webhook_url = f"https://universal-bot-production.up.railway.app/webhook"
+    await application.bot.set_webhook(webhook_url)
+    logger.info(f"Webhook установлен: {webhook_url}")
+
+@app.post("/webhook")
+async def webhook_handler(request: Request):
+    data = await request.json()
+    await application.update_queue.put(data)
+    return {"ok": True}
+
+# Главная страница (для проверки)
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Бот работает через Webhook"}
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run("run:app", host="0.0.0.0", port=port)
