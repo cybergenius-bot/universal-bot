@@ -1,20 +1,39 @@
 import os
+import requests
 from fastapi import FastAPI, Request
+
+# Читаем токен из переменной окружения
+TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("Переменная окружения BOT_TOKEN не установлена!")
+
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TOKEN}"
 
 app = FastAPI()
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+def send_message(chat_id: int, text: str):
+    """Отправка сообщения в Telegram"""
+    url = f"{TELEGRAM_API_URL}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    requests.post(url, json=payload)
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook_handler(request: Request):
+    """Обработка входящих апдейтов от Telegram"""
     data = await request.json()
-    print("Update from Telegram:", data)
-    return {"ok": True}
+    print("Update:", data)  # Для логов
+
+    if "message" in data:
+        chat_id = data["message"]["chat"]["id"]
+        text = data["message"].get("text", "")
+
+        if text == "/start":
+            send_message(chat_id, "Привет! Бот работает 🚀")
+        elif text:
             send_message(chat_id, f"Вы написали: {text}")
 
     return {"ok": True}
 
-def send_message(chat_id, text):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+@app.get("/")
+async def root():
+    return {"status": "ok"}
