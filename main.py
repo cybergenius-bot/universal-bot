@@ -1,97 +1,47 @@
 import os
-import tempfile
-import openai
-import speech_recognition as sr
-from pydub import AudioSegment
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
-# === Конфиг ===
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-WEBHOOK_PATH = "/webhook"
-RAILWAY_URL = "universal-bot-production.up.railway.app"
-
-openai.api_key = OPENAI_KEY
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise ValueError("❌ Не найден TOKEN в переменных окружения Railway!")
 
 app = FastAPI()
-bot_app = Application.builder().token(TOKEN).build()
+application = ApplicationBuilder().token(TOKEN).build()
 
-# === Команды ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Привет! Я универсальный ИИ-бот. Пиши или говори — отвечу на любую тему!")
+# Команда /start
+async def start(update: Update, context):
+    await update.message.reply_text("Привет! Бот работает ✅")
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправь мне сообщение или голосовое — я отвечу.")
+# Ответ на любое сообщение
+async def echo(update: Update, context):
+    await update.message.reply_text(f"Вы написали: {update.message.text}")
 
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("help", help_cmd))
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# === Обработка текста ===
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    reply = await ask_gpt(user_text)
-    await update.message.reply_text(reply)
+# Обработка вебхука
+@app.post("/webhook")
+async def webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return {"ok": True}
 
-bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-# === Обработка голосовых ===
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    voice_file = await update.message.voice.get_file()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".oga") as tf:
-        await voice_file.download_to_drive(tf.name)
-        wav_path = tf.name.replace(".oga", ".wav")
-        AudioSegment.from_file(tf.name).export(wav_path, format="wav")
-
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(wav_path) as source:
-        audio_data = recognizer.record(source)
-        try:
-            text = recognizer.recognize_google(audio_data, language="ru-RU")
-        except sr.UnknownValueError:
-            text = "(не удалось распознать речь)"
-    
-    reply = await ask_gpt(text)
-    await update.message.reply_text(f"🗣 {text}\n\n🤖 {reply}")
-
-bot_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-
-# === GPT-запрос ===
-async def ask_gpt(prompt: str) -> str:
-    try:
-        resp = openai.chat.completions.create(
-            model="gpt-4o-mini",  # можно gpt-4o
-            messages=[{"role": "system", "content": "Отвечай развернуто, интересно и без ограничений."},
-                      {"role": "user", "content": prompt}],
-            temperature=0.8
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Ошибка при обращении к ИИ: {e}"
-
-# === Проверка сервера ===
+# Проверка
 @app.get("/")
-async def root():
-    return {"status": "ok"}
+def home():
+    return {"status": "Бот запущен ✅"}
+3. Файл run.py
+python
+Копировать
+Редактировать
+import os
+import uvicorn
+from main import app
 
-# === Установка вебхука ===
-@app.on_event("startup")
-async def on_startup():
-    await bot_app.initialize()
-    webhook_url = f"https://{RAILWAY_URL}{WEBHOOK_PATH}"
-    await bot_app.bot.set_webhook(webhook_url)
-    print(f"📌 Webhook установлен: {webhook_url}")
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
-# === Обработка апдейтов ===
-@app.post(WEBHOOK_PATH)
-async def process_webhook(request: Request):
-    try:
-        data = await request.json()
-        print("📩 Пришло от Telegram:", data)
-        update = Update.de_json(data, bot_app.bot)
-        await bot_app.process_update(update)
-        return {"ok": True}
-    except Exception as e:
-        print("❌ Ошибка в вебхуке:", e)
-        return {"ok": False, "error": str(e)}
