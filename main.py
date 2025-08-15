@@ -1,30 +1,37 @@
 import os
 from fastapi import FastAPI, Request
 from telegram import Update
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import logging
 
-# Логи для отладки
+# --- Логирование ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
-TOKEN = os.getenv("BOT_TOKEN")  # Токен бота из Railway Variables
-RAILWAY_URL = os.getenv("RAILWAY_URL")  # Например: https://universal-bot-production.up.railway.app
+# --- Переменные ---
+TOKEN = os.getenv("BOT_TOKEN")
+RAILWAY_URL = os.getenv("RAILWAY_URL")
 
-# Создаём приложение Telegram
+if not TOKEN or not RAILWAY_URL:
+    raise ValueError("❌ BOT_TOKEN или RAILWAY_URL не заданы!")
+
+# --- Создаём приложение Telegram ---
 application = Application.builder().token(TOKEN).build()
 
-# Создаём FastAPI сервер
-app = FastAPI()
-
-# Команда /start
+# --- Хендлер /start ---
 async def start(update: Update, context):
-    await update.message.reply_text("✅ Бот запущен и готов к работе!")
+    await update.message.reply_text("✅ Привет! Бот запущен и готов к работе.")
+
+# --- Хендлер на любые сообщения ---
+async def echo(update: Update, context):
+    await update.message.reply_text(f"Вы написали: {update.message.text}")
 
 application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# При старте сервера
+# --- FastAPI ---
+app = FastAPI()
+
 @app.on_event("startup")
 async def startup_event():
     await application.initialize()
@@ -32,7 +39,6 @@ async def startup_event():
     await application.bot.set_webhook(webhook_url)
     logger.info(f"✅ Webhook установлен: {webhook_url}")
 
-# Обработка вебхуков
 @app.post(f"/webhook/{TOKEN}")
 async def webhook_handler(request: Request):
     data = await request.json()
@@ -40,7 +46,6 @@ async def webhook_handler(request: Request):
     await application.process_update(update)
     return {"ok": True}
 
-# При завершении работы
-@app.on_event("shutdown")
-async def shutdown_event():
-    await application.shutdown()
+@app.get("/")
+async def root():
+    return {"status": "бот запущен"}
