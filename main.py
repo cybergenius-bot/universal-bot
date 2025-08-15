@@ -19,16 +19,16 @@ def send_message(chat_id: int, text: str):
 
 @app.post("/webhook")
 async def webhook_handler(request: Request):
-    """Обработка входящих апдейтов от Telegram"""
+    """Обработка апдейтов от Telegram"""
     data = await request.json()
-    print("Update:", data)  # Для логов
+    print("Update:", data)
 
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
 
         if text == "/start":
-            send_message(chat_id, "Привет! Бот работает 🚀")
+            send_message(chat_id, "Привет! Я работаю 🚀")
         elif text:
             send_message(chat_id, f"Вы написали: {text}")
 
