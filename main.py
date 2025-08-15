@@ -1,41 +1,34 @@
 import os
-import logging
 from fastapi import FastAPI, Request
-from telegram.ext import ApplicationBuilder
-from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Токен из переменной окружения
+TOKEN = os.getenv("BOT_TOKEN")
 
-TOKEN = os.getenv("TOKEN")  # В Railway в переменных окружения
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"https://{os.getenv('RAILWAY_STATIC_URL')}{WEBHOOK_PATH}"
-
+# Создаём FastAPI приложение
 app = FastAPI()
 
-# Создаём приложение Telegram
-application = ApplicationBuilder().token(TOKEN).build()
+# Создаём Telegram Application
+application = Application.builder().token(TOKEN).build()
 
-# Простой обработчик для теста
-async def start(update: Update, context):
-    await update.message.reply_text("Бот работает!")
 
+# ===== Команды бота =====
+async def start(update, context):
+    await update.message.reply_text("Привет! Бот запущен и работает 24/7 🚀")
+
+
+async def echo(update, context):
+    await update.message.reply_text(f"Вы написали: {update.message.text}")
+
+
+# Регистрируем обработчики
 application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-@app.on_event("startup")
-async def on_startup():
-    logger.info(f"Запуск бота, установка вебхука: {WEBHOOK_URL}")
-    await application.bot.set_webhook(WEBHOOK_URL)
-    await application.start()
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    logger.info("Остановка бота...")
-    await application.stop()
-
-@app.post(WEBHOOK_PATH)
-async def webhook_handler(request: Request):
+# ===== Вебхук =====
+@app.post("/webhook")
+async def webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
+    await application.update_queue.put(data)
     return {"ok": True}
