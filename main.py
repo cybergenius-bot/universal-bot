@@ -1,58 +1,45 @@
 import os
 from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-TOKEN = os.getenv("BOT_TOKEN")  # Токен из переменной окружения
-WEBHOOK_PATH = f"/webhook/{TOKEN}"
-WEBHOOK_URL = f"{os.getenv('RAILWAY_URL')}{WEBHOOK_PATH}"
+# Загружаем переменные окружения
+TOKEN = os.getenv("BOT_TOKEN")
+RAILWAY_URL = os.getenv("RAILWAY_URL")
 
-app = FastAPI()
+if not TOKEN:
+    raise ValueError("❌ Переменная BOT_TOKEN не задана!")
+
+if not RAILWAY_URL:
+    print("⚠️ ВНИМАНИЕ: Переменная RAILWAY_URL не задана! Webhook не будет установлен.")
 
 # Создаём приложение Telegram
-telegram_app = Application.builder().token(TOKEN).build()
-
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Бот запущен и готов к работе.")
-
-telegram_app.add_handler(CommandHandler("start", start))
-
-# Устанавливаем webhook при старте FastAPI
-@app.on_event("startup")
-async def on_startup():
-    await telegram_app.bot.set_webhook(WEBHOOK_URL)
-
-# Маршрут для Telegram webhook
-@app.post(WEBHOOK_PATH)
-async def webhook_handler(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return {"ok": True}
-# Создаём Telegram Application
 application = Application.builder().token(TOKEN).build()
 
-# Обработчик /start
+# Команда /start
 async def start(update, context):
-    await update.message.reply_text("👋 Привет! Бот запущен и готов к работе ✅")
+    await update.message.reply_text("👋 Привет! Бот запущен и готов к работе!")
 
+# Ответ на любое сообщение
+async def echo(update, context):
+    await update.message.reply_text(f"Вы написали: {update.message.text}")
+
+# Регистрируем команды и обработчики
 application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# При старте приложения — ставим вебхук
+# FastAPI сервер
+app = FastAPI()
+
 @app.on_event("startup")
 async def startup_event():
-    await application.bot.set_webhook(f"{RAILWAY_URL}/webhook")
-    print(f"✅ Webhook установлен: {RAILWAY_URL}/webhook")
+    if RAILWAY_URL:
+        await application.bot.set_webhook(f"{RAILWAY_URL}/webhook")
+        print(f"✅ Webhook установлен: {RAILWAY_URL}/webhook")
+    else:
+        print("⚠️ Webhook не установлен — нет RAILWAY_URL")
 
-# При остановке — останавливаем бота
-@app.on_event("shutdown")
-async def shutdown_event():
-    await application.stop()
-
-# FastAPI маршрут для приёма обновлений
 @app.post("/webhook")
-async def telegram_webhook(request: Request):
-    update = await request.json()
-    await application.update_queue.put(update)
+async def webhook_endpoint(request: Request):
+    data = await request.json()
+    await application.update_queue.put(data)
     return {"status": "ok"}
