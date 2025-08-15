@@ -1,64 +1,46 @@
 import os
 import logging
 from fastapi import FastAPI, Request
-import httpx
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder
 
-# -----------------------------
 # Логирование
-# -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# -----------------------------
-# Переменные окружения
-# -----------------------------
-TOKEN = os.getenv("TOKEN")  # Твой токен бота
-BASE_URL = os.getenv("RAILWAY_STATIC_URL")  # Например: https://universal-bot-production.up.railway.app
-WEBHOOK_PATH = f"/webhook/{TOKEN}"
-WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-
-# -----------------------------
-# Инициализация FastAPI и Telegram Application
-# -----------------------------
+# Создаём FastAPI приложение
 app = FastAPI()
+
+# Получаем токен бота из переменных окружения
+TOKEN = os.getenv("TOKEN")
+
+# Создаём Telegram Application
 application = ApplicationBuilder().token(TOKEN).build()
 
-# -----------------------------
-# Обработчики команд
-# -----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я работаю через Railway и Webhook 🚀")
-
-application.add_handler(CommandHandler("start", start))
-
-# -----------------------------
-# Установка вебхука при старте
-# -----------------------------
+# Стартовое событие
 @app.on_event("startup")
 async def on_startup():
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-            params={"url": WEBHOOK_URL}
-        )
-        logger.info(f"Webhook установлен: {WEBHOOK_URL}")
-        logger.info(f"Результат установки: {resp.json()}")
+    logger.info("Запуск приложения...")
+    # Устанавливаем вебхук
+    webhook_url = f"https://{os.getenv('RAILWAY_STATIC_URL')}/webhook"
+    await application.bot.set_webhook(webhook_url)
+    logger.info(f"Webhook установлен: {webhook_url}")
 
-# -----------------------------
-# Удаление вебхука при остановке
-# -----------------------------
+# Событие остановки
 @app.on_event("shutdown")
 async def on_shutdown():
+    logger.info("Остановка приложения...")
     await application.stop()
 
-# -----------------------------
-# Приём апдейтов от Telegram
-# -----------------------------
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(req: Request):
-    data = await req.json()
+# Обработка запросов от Telegram
+@app.post("/webhook")
+async def webhook_handler(request: Request):
+    data = await request.json()
     update = Update.de_json(data, application.bot)
     await application.process_update(update)
     return {"ok": True}
+
+# Для проверки работоспособности
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Bot is running"}
