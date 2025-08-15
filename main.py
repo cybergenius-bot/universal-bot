@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, Request
 import requests
 
-TOKEN = os.getenv("BOT_TOKEN")  # токен из Railway Variables
+TOKEN = os.getenv("BOT_TOKEN")  # Токен из переменных окружения Railway
 TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
 app = FastAPI()
@@ -22,10 +22,11 @@ async def webhook(token: str, request: Request):
     if "message" in data and "text" in data["message"]:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"]["text"]
+
         requests.post(f"{TELEGRAM_API}/sendMessage", json={
             "chat_id": chat_id,
             "text": f"Вы написали: {text}"
         })
 
     return {"ok": True}
-
+После этого:
