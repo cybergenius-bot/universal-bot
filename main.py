@@ -1,17 +1,19 @@
+import os
 from telegram.ext import Application, CommandHandler
 
-# 🔹 Вставь сюда токен, который дал BotFather (без пробелов, без кавычек вокруг)
-TOKEN = "ТВОЙ_ТОКЕН"
+# Читаем токен из Railway переменной
+TOKEN = os.getenv("TOKEN")
+if not TOKEN:
+    raise ValueError("❌ Не найден TOKEN в переменных окружения Railway!")
 
 # Команда /start
 async def start(update, context):
-    await update.message.reply_text("Привет! ✅ Бот запущен и работает в polling-режиме.")
+    await update.message.reply_text("✅ Бот запущен и готов к работе!")
 
-# Главная функция
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.run_polling()
+# Создаём приложение
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
 
+# Запуск
 if __name__ == "__main__":
-    main()
+    app.run_polling()
