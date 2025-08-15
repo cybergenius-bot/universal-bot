@@ -42,10 +42,3 @@ async def telegram_webhook(request: Request):
     update = await request.json()
     await application.update_queue.put(update)
     return {"status": "ok"}
-
-# ===== Вебхук =====
-@app.post("/webhook")
-async def webhook(request: Request):
-    data = await request.json()
-    await application.update_queue.put(data)
-    return {"ok": True}
