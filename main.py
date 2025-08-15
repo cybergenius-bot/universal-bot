@@ -1,24 +1,26 @@
 import os
-import requests
 from fastapi import FastAPI, Request
+import requests
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")  # В Railway переменная TELEGRAM_TOKEN = твой токен
-if not TOKEN:
-    raise RuntimeError("Переменная TELEGRAM_TOKEN не установлена!")
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # в Railway указываешь BOT_TOKEN
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # в Railway указываешь URL Railway + /webhook
 
-BASE_URL = f"https://api.telegram.org/bot{TOKEN}"
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не установлен!")
 
 app = FastAPI()
+TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+# Устанавливаем вебхук при старте
+@app.on_event("startup")
+def set_webhook():
+    if not WEBHOOK_URL:
+        raise RuntimeError("WEBHOOK_URL не установлен!")
+    r = requests.get(f"{TELEGRAM_API}/setWebhook", params={"url": WEBHOOK_URL + "/webhook"})
+    print(r.json())
 
-def send_message(chat_id, text):
-    url = f"{BASE_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
-
-
-@app.post(f"/webhook/{TOKEN}")
-async def webhook_handler(request: Request):
+@app.post("/webhook")
+async def webhook(request: Request):
     data = await request.json()
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
@@ -26,8 +28,12 @@ async def webhook_handler(request: Request):
         send_message(chat_id, f"Вы написали: {text}")
     return {"ok": True}
 
+def send_message(chat_id, text):
+    requests.post(f"{TELEGRAM_API}/sendMessage", json={
+        "chat_id": chat_id,
+        "text": text
+    })
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))  # Railway подставит свой порт
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+@app.get("/")
+def home():
+    return {"status": "бот работает"}
