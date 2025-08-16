@@ -1,31 +1,35 @@
-from fastapi import FastAPI, Request
-import requests
 import os
+from fastapi import FastAPI, Request
+import httpx
 
-TOKEN = os.environ.get("BOT_TOKEN", "ТВОЙ_ТОКЕН")  # токен из Railway → Variables
-TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TOKEN}"
 
 app = FastAPI()
 
 
-# простой echo-хендлер
-@app.post("/webhook/{token}")
-async def webhook(token: str, request: Request):
-    if token != TOKEN:  # защита от чужих запросов
-        return {"ok": False, "description": "invalid token"}
+@app.get("/")
+async def root():
+    return {"status": "ok"}
 
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
     data = await request.json()
-    if "message" in data:
+
+    if "message" in data and "text" in data["message"]:
         chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
-        # отправляем обратно то, что написал пользователь
-        requests.post(f"{TELEGRAM_API}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": f"Эхо: {text}"
-        })
+        text = data["message"]["text"]
+
+        # Отвечаем тем же текстом (эхо)
+        async with httpx.AsyncClient() as client:
+            await client.post(f"{TELEGRAM_API_URL}/sendMessage", json={
+                "chat_id": chat_id,
+                "text": text
+            })
 
     return {"ok": True}
-
 
 # запуск локально или на Railway
 if __name__ == "__main__":
