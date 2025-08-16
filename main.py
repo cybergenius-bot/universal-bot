@@ -2,15 +2,13 @@ import os
 import requests
 from fastapi import FastAPI, Request
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Добавь BOT_TOKEN в переменные Railway
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = FastAPI()
 
 def send_message(chat_id: int, text: str):
-    url = f"{API_URL}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload)
+    requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 @app.get("/")
 def home():
