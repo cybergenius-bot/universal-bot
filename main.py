@@ -18,5 +18,11 @@ async def webhook(request: Request):
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
-        send_message(chat_id, f"Вы написали: {text}")  # ← именно здесь началось "эхо"
+        # Эхо-ответ
+        send_message(chat_id, f"Вы написали: {text}")
     return {"ok": True}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))  # Railway подставляет PORT
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
