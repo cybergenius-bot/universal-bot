@@ -2,22 +2,33 @@ from fastapi import FastAPI, Request
 import requests
 import os
 
-TOKEN = os.getenv("BOT_TOKEN")  # твой токен бота в Railway Variables
-API_URL = f"https://api.telegram.org/bot{TOKEN}"
+TOKEN = os.environ.get("BOT_TOKEN", "ТВОЙ_ТОКЕН")  # токен из Railway → Variables
+TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
 app = FastAPI()
 
-# обработка вебхука именно по /webhook/{token}
-@app.post(f"/webhook/{TOKEN}")
-async def webhook_handler(request: Request):
+
+# простой echo-хендлер
+@app.post("/webhook/{token}")
+async def webhook(token: str, request: Request):
+    if token != TOKEN:  # защита от чужих запросов
+        return {"ok": False, "description": "invalid token"}
+
     data = await request.json()
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "")
-        # отвечаем текстом
-        requests.post(f"{API_URL}/sendMessage", json={"chat_id": chat_id, "text": f"Вы написали: {text}"})
+        # отправляем обратно то, что написал пользователь
+        requests.post(f"{TELEGRAM_API}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": f"Эхо: {text}"
+        })
+
     return {"ok": True}
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+
+# запуск локально или на Railway
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))  # Railway даёт свой порт
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
