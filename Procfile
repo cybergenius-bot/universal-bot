@@ -1,1 +1,1 @@
-web: python bot.py
+web: gunicorn bot:app --worker-class uvicorn.workers.UvicornWorker
