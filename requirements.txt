@@ -1,2 +1,1 @@
-python-telegram-bot[webhooks]==21.0
-Flask==3.0.3
+'Flask==3.0.3\npython-telegram-bot[webhooks]==21.1\naiohttp==3.9.5' 
