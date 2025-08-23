@@ -2,7 +2,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import AsyncOpenAI
-from db.py import init_db, SessionLocal, User
+from db import init_db, SessionLocal, User
 from payments import PayPalClient
 from config import settings
 
