@@ -1,5 +1,5 @@
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings  # ✅ правильный импорт
 
 
 class Settings(BaseSettings):
@@ -13,4 +13,5 @@ class Settings(BaseSettings):
     PORT: int = int(os.getenv("PORT", 8000))
 
 
+# создаём объект настроек
 settings = Settings()
