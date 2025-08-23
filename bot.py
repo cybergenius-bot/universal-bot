@@ -2,46 +2,40 @@ import os
 import asyncio
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler
 
-# Получаем токен и базовый URL
+# Получаем переменные окружения
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 
 if not TOKEN or not BASE_URL:
     raise RuntimeError("Переменные окружения TELEGRAM_TOKEN и BASE_URL обязательны!")
 
-# Инициализируем Flask
+# Создаём Flask-приложение
 app = Flask(__name__)
 
-# Создаём Telegram Application
-application = Application.builder().token(TOKEN).build()
+# Инициализация Telegram-приложения
+application = ApplicationBuilder().token(TOKEN).build()
 
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я CyberGenius 🤖 Готов помочь!")
+# Обработчик команды /start
+async def start(update: Update, context):
+    await update.message.reply_text("Привет! Я работаю через Webhook.")
 
-# Регистрируем handler
 application.add_handler(CommandHandler("start", start))
 
-# Webhook endpoint
-@app.post(f"/{TOKEN}")
+# Установка webhook
+@app.before_first_request
+def set_webhook():
+    url = f"{BASE_URL}/{TOKEN}"
+    asyncio.run(application.bot.set_webhook(url))
+
+# Приём входящих сообщений
+@app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    try:
-        data = request.get_json(force=True)
-        update = Update.de_json(data, application.bot)
-        asyncio.run(application.process_update(update))
-    except Exception as e:
-        print(f"[ERROR] Ошибка во время обработки webhook: {e}")
-    return "ok", 200
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    asyncio.run(application.process_update(update))
+    return "ok"
 
-# Устанавливаем webhook перед запуском сервера
-async def setup():
-    await application.initialize()
-    webhook_url = f"{BASE_URL}/{TOKEN}"
-    await application.bot.set_webhook(url=webhook_url)
-    print(f"[INFO] Webhook установлен: {webhook_url}")
-
+# Запуск Flask
 if __name__ == "__main__":
-    asyncio.run(setup())
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=8080)
