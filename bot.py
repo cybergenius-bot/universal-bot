@@ -1,65 +1,42 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from openai import AsyncOpenAI
-from db import init_db, SessionLocal, User
-from payments import PayPalClient
+# bot.py
+import asyncio
+from aiohttp import web
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from config import settings
+from db import init_db
+from payments import PayPalClient
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Пример handler'ов, реализуйте по вашему коду
+async def start_handler(update, context):
+    await update.message.reply_text("Привет! Я универсальный бот.")
 
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-paypal = PayPalClient()
+async def message_handler(update, context):
+    await update.message.reply_text("Вы написали: " + update.message.text)
 
-TARIFFS = {"10": (100, 10), "30": (500, 30), "50": (-1, 50)}  # (messages, price)
+async def main():
+    await init_db()
 
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Привет 👋 Я GPT-бот.\nУ тебя есть 5 бесплатных сообщений.\nПосле — выбери тариф."
-    keyboard = [
-        [InlineKeyboardButton("💳 Купить доступ", callback_data="buy")]
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    async with SessionLocal() as session:
-        user = await session.get(User, {"tg_id": user_id})
-        if not user:
-            user = User(tg_id=user_id)
-            session.add(user)
-            await session.commit()
-
-        if user.free_left <= 0 and user.paid_left <= 0 and not user.is_unlimited:
-            await update.message.reply_text("Лимит исчерпан. Нажми /start и выбери тариф.")
-            return
-
-        # уменьшаем лимиты
-        if user.free_left > 0:
-            user.free_left -= 1
-        elif user.paid_left > 0:
-            user.paid_left -= 1
-        await session.commit()
-
-    resp = await client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "system", "content": "Ты универсальный помощник."},
-                  {"role": "user", "content": update.message.text}]
-    )
-    answer = resp.choices[0].message.content
-    await update.message.reply_text(answer)
-
-
-def main():
     app = Application.builder().token(settings.TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
+    async def health(request):
+        return web.Response(text="OK")
+
+    web_app = web.Application()
+    path = f"/telegram/{settings.TELEGRAM_TOKEN}"
+    web_app.router.add_post(path, app.webhook_handler)
+    web_app.router.add_get("/healthz", health)
+
+    await app.bot.set_webhook(url=f"{settings.BASE_URL}{path}")
+
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", settings.PORT)
+    await site.start()
+
+    print(f"Webhook set to {settings.BASE_URL}{path}")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(init_db())
-    main()
+    asyncio.run(main())
