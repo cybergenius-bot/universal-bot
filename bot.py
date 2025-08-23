@@ -1,72 +1,63 @@
+# main.py
 import os
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Final
+from telegram import Update
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters
+    Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
-from database import get_user, update_user_usage, init_db, apply_plan, check_expired
-from ai_handler import ask_ai
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+log = logging.getLogger("universal-bot")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", 8000))
+# --- ENV ---
+TOKEN: Final[str] = os.getenv("TELEGRAM_TOKEN", "")
+if not TOKEN:
+    raise RuntimeError("No TELEGRAM_TOKEN provided")
 
-PAYMENT_LINKS = {
-    "try": "https://www.paypal.com/pay?amount=5",
-    "basic": "https://www.paypal.com/pay?amount=12.99",
-    "pro": "https://www.paypal.com/pay?amount=19.99"
-}
+PORT: int = int(os.getenv("PORT", "8080"))
 
+# Полный публичный домен Railway БЕЗ слэша на конце,
+# например: https://universal-bot-production.up.railway.app
+WEBHOOK_BASE: str = os.getenv("WEBHOOK_URL", "").rstrip("/")
+
+# Можно оставить по умолчанию
+WEBHOOK_PATH: str = os.getenv("WEBHOOK_PATH", "webhook")
+
+
+# --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "👋 Привет! У тебя есть 5 бесплатных сообщений. Напиши любой вопрос."
-    await update.message.reply_text(text)
+    await update.message.reply_text("Бот запущен ✅ Пиши — отвечу.")
 
-async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    check_expired(user_id)
-    messages_left, plan, expires = get_user(user_id)
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = update.message.text or ""
+    await update.message.reply_text(f"Ты написал: {txt}")
 
-    if messages_left <= 0:
-        keyboard = [
-            [InlineKeyboardButton("💬 15 сообщений – $5", callback_data="try")],
-            [InlineKeyboardButton("💬 300 сообщений – $12.99", callback_data="basic")],
-            [InlineKeyboardButton("♾ Безлимит – $19.99", callback_data="pro")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("❗ Лимит сообщений исчерпан. Выбери тариф:", reply_markup=reply_markup)
-        return
-
-    user_msg = update.message.text
-    gpt_reply = await ask_ai(user_msg)
-    await update.message.reply_text(gpt_reply)
-    update_user_usage(user_id)
-
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    plan = query.data
-    url = PAYMENT_LINKS.get(plan)
-    if url:
-        await query.edit_message_text(f"💳 Перейди по ссылке для оплаты:
-{url}")
-    else:
-        await query.edit_message_text("❌ Ошибка. Попробуй снова.")
 
 def main():
-    init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
-    app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+
+    if WEBHOOK_BASE:
+        # Синхронная обёртка — сама настроит и поднимет вебхук и event loop.
+        webhook_url = f"{WEBHOOK_BASE}/{WEBHOOK_PATH}"
+        log.info("Run webhook on %s", webhook_url)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=WEBHOOK_PATH,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        # Режим поллинга для локальных тестов
+        app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
