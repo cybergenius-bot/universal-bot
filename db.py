@@ -4,7 +4,12 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float
 import datetime
 from config import settings
 
-engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
+# Приводим DATABASE_URL к asyncpg-формату
+db_url = settings.DATABASE_URL
+if db_url.startswith("postgresql://") and "+asyncpg" not in db_url:
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+engine = create_async_engine(db_url, echo=False, future=True)
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 Base = declarative_base()
 
