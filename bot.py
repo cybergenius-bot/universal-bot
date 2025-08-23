@@ -9,7 +9,7 @@ from telegram.ext import (
     ContextTypes
 )
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -22,31 +22,33 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-# Создание Telegram Application
+# Telegram Application
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Команда /start
+# /start команда
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я бот и уже работаю 🔥")
 
-# Регистрируем хендлер
+# Добавляем хендлер
 application.add_handler(CommandHandler("start", start))
 
-# Установка Webhook при запуске
+# Инициализация Webhook
 async def init_bot():
     await application.initialize()
     await application.start()
     await application.bot.set_webhook(url=WEBHOOK_URL)
-    logging.info("Бот запущен и Webhook установлен")
+    logging.info("✅ Webhook установлен и бот запущен")
 
-# Обработка входящих Webhook-запросов
+# Webhook endpoint
 @app.route(f"/{BOT_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
     asyncio.run(application.process_update(update))
     return "OK"
 
-# Запускаем init_bot при первом запросе к Flask
-@app.before_first_request
-def before_first_request():
-    asyncio.run(init_bot())
+# 🟢 Запускаем init_bot в фоне
+asyncio.get_event_loop().create_task(init_bot())
+
+# 🟢 Запуск Flask-сервера
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
