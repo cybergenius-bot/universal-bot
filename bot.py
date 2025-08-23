@@ -1,56 +1,65 @@
-import os
-import asyncio
 import logging
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from openai import AsyncOpenAI
+from db.py import init_db, SessionLocal, User
+from payments import PayPalClient
+from config import settings
 
-# Логирование
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+paypal = PayPalClient()
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+TARIFFS = {"10": (100, 10), "30": (500, 30), "50": (-1, 50)}  # (messages, price)
 
-application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я бот и уже работаю 🔥")
+    text = "Привет 👋 Я GPT-бот.\nУ тебя есть 5 бесплатных сообщений.\nПосле — выбери тариф."
+    keyboard = [
+        [InlineKeyboardButton("💳 Купить доступ", callback_data="buy")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-application.add_handler(CommandHandler("start", start))
 
-# Храним флаг, проинициализирован ли бот
-bot_ready = False
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    async with SessionLocal() as session:
+        user = await session.get(User, {"tg_id": user_id})
+        if not user:
+            user = User(tg_id=user_id)
+            session.add(user)
+            await session.commit()
 
-# webhook endpoint
-@app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    global bot_ready
-    if not bot_ready:
-        return "Bot not initialized yet", 503
+        if user.free_left <= 0 and user.paid_left <= 0 and not user.is_unlimited:
+            await update.message.reply_text("Лимит исчерпан. Нажми /start и выбери тариф.")
+            return
 
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
-    return "OK"
+        # уменьшаем лимиты
+        if user.free_left > 0:
+            user.free_left -= 1
+        elif user.paid_left > 0:
+            user.paid_left -= 1
+        await session.commit()
 
-# Основной запуск
+    resp = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": "Ты универсальный помощник."},
+                  {"role": "user", "content": update.message.text}]
+    )
+    answer = resp.choices[0].message.content
+    await update.message.reply_text(answer)
+
+
+def main():
+    app = Application.builder().token(settings.TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.run_polling()
+
+
 if __name__ == "__main__":
-    async def main():
-        global bot_ready
-        await application.initialize()
-        await application.start()
-        await application.bot.set_webhook(url=WEBHOOK_URL)
-        bot_ready = True
-        logging.info("✅ Бот запущен и Webhook установлен")
-
-    asyncio.run(main())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    import asyncio
+    asyncio.run(init_db())
+    main()
