@@ -4,38 +4,38 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Получаем переменные окружения
+# Получаем токен и базовый URL
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 
-# Проверка токена и URL
 if not TOKEN or not BASE_URL:
     raise RuntimeError("Переменные окружения TELEGRAM_TOKEN и BASE_URL обязательны!")
 
-# Создаём Flask
+# Инициализируем Flask
 app = Flask(__name__)
 
 # Создаём Telegram Application
 application = Application.builder().token(TOKEN).build()
 
-# Обработчик команды /start
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я CyberGenius 🤖 Готов помочь!")
 
 # Регистрируем handler
 application.add_handler(CommandHandler("start", start))
 
-# Webhook endpoint — исправлено на PTB-safe метод
-@app.route(f"/{TOKEN}", methods=["POST"])
+# Webhook endpoint
+@app.post(f"/{TOKEN}")
 def webhook():
     try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        application.create_task(application.process_update(update))  # 💡 Вот правильное место
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        asyncio.run(application.process_update(update))
     except Exception as e:
-        print(f"[ERROR] Ошибка в webhook: {e}")
-    return "OK", 200
+        print(f"[ERROR] Ошибка во время обработки webhook: {e}")
+    return "ok", 200
 
-# Устанавливаем Webhook до запуска Flask
+# Устанавливаем webhook перед запуском сервера
 async def setup():
     await application.initialize()
     webhook_url = f"{BASE_URL}/{TOKEN}"
