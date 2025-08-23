@@ -1,23 +1,54 @@
 import os
+import asyncio
+from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # должен быть без / на конце
 
+# Переменные окружения
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+BASE_URL = os.getenv("BASE_URL")
+PORT = int(os.getenv("PORT", 5000))
+
+
+# Проверка
+if not TOKEN or not BASE_URL:
+raise RuntimeError("Переменные окружения TELEGRAM_TOKEN и BASE_URL обязательны!")
+
+
+# Flask и Telegram Application
+app = Flask(__name__)
+application = Application.builder().token(TOKEN).build()
+
+
+# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Бот работает! Всё хорошо 👍")
+await update.message.reply_text("Привет! Я CyberGenius 🤖 Готов помочь!")
 
-def main():
-    app = Application.builder().token(TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("start", start))
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        webhook_url=f"{WEBHOOK_URL}/webhook/{TOKEN}"
-    )
 
+# Webhook endpoint (sync-функция для Flask)
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+try:
+update = Update.de_json(request.get_json(force=True), application.bot)
+asyncio.create_task(application.process_update(update))
+except Exception as e:
+print(f"[ERROR] Webhook error: {e}")
+return "OK", 200
+
+
+# Установка Webhook
+async def setup():
+await application.initialize()
+webhook_url = f"{BASE_URL}/{TOKEN}"
+await application.bot.set_webhook(url=webhook_url)
+print(f"[INFO] Webhook установлен: {webhook_url}")
+
+
+# Запуск
 if __name__ == "__main__":
-    main()
+asyncio.run(setup())
+app.run(host="0.0.0.0", port=PORT)
