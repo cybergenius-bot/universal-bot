@@ -4,24 +4,26 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+# Чтение переменных окружения
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 
 if not TOKEN or not BASE_URL:
-    raise RuntimeError("Не заданы TELEGRAM_TOKEN и BASE_URL в .env")
+    raise RuntimeError("TELEGRAM_TOKEN и BASE_URL обязательны")
 
+# Flask-приложение
 app = Flask(__name__)
 
-# Создание приложения Telegram
+# Telegram Application
 application = Application.builder().token(TOKEN).build()
 
 # Обработчик команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Бот работает ✅")
+    await update.message.reply_text("✅ Бот работает! Добро пожаловать.")
 
 application.add_handler(CommandHandler("start", start))
 
-# Webhook-обработчик
+# Webhook для Telegram
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
@@ -34,9 +36,10 @@ def webhook():
     asyncio.run(process())
     return "OK", 200
 
-# Установка webhook один раз перед первым запросом
+# Установка Webhook при первом запуске
 @app.before_first_request
 def setup_webhook():
     async def set_webhook():
         await application.bot.set_webhook(url=f"{BASE_URL}/{TOKEN}")
+        print(f"[INFO] Webhook установлен: {BASE_URL}/{TOKEN}")
     asyncio.run(set_webhook())
