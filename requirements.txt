@@ -1,4 +1,4 @@
-python-telegram-bot==21.6
+ython-telegram-bot==21.6
 openai==1.40.0
 aiohttp==3.10.3
 SQLAlchemy==2.0.32
