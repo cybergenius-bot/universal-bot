@@ -1,19 +1,16 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = "gpt-4o"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox")
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
-PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET")
-
-FREE_MESSAGES = 5
 
 TARIFFS = {
-    "start": {"price": 10, "messages": 20, "expires_days": None},
-    "standard": {"price": 30, "messages": 200, "expires_days": None},
-    "premium": {"price": 50, "messages": None, "expires_days": 30},
+"buy_start": {"messages": 20, "price": 10},
+"buy_standard": {"messages": 200, "price": 30},
+"buy_premium": {"messages": float("inf"), "price": 50}
 }
