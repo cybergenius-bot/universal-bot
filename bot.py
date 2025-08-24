@@ -3,10 +3,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from config import TELEGRAM_TOKEN, TARIFFS, OPENAI_API_KEY, OPENAI_MODEL
 from db import get_user, decrement_messages, has_active_subscription
-import openai
+from openai import AsyncOpenAI
 
-# Настройка OpenAI клиента
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
+# Настройка OpenAI клиента (асинхронный)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +26,7 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработка обычных сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("Получено сообщение:", update.message.text)  # Для логов
+    print("Получено сообщение:", update.message.text)
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     subscribed = await has_active_subscription(tg_id)
@@ -37,12 +37,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prompt = update.message.text
         try:
-            completion = openai_client.chat.completions.create(
+            completion = await openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
                     {
                         "role": "system",
-                        "content": "Ты профессиональный ассистент с неограниченным доступом к знаниям. Отвечай максимально полно, глубоко и по существу. Ты способен решать сложные задачи, писать код, помогать с диссертациями, проектами и исследованиями. Не ограничивай себя в темах, помогай пользователю на максимуме."
+                        "content": (
+                            "Ты профессиональный ассистент с неограниченным доступом к знаниям. "
+                            "Отвечай максимально полно, глубоко и по существу. Ты способен решать сложные задачи, "
+                            "писать код, помогать с диссертациями, проектами и исследованиями. Не ограничивай себя в темах."
+                        )
                     },
                     {"role": "user", "content": prompt}
                 ],
@@ -52,8 +56,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply += "\n\n📣 Поделись ботом с друзьями: https://t.me/SmartBot_OPRO_bot"
             await update.message.reply_text(reply)
         except Exception as e:
+            logging.exception("Ошибка при запросе к OpenAI:")
             await update.message.reply_text("❌ Ошибка при обращении к GPT.")
-            print(e)
+
     else:
         keyboard = [
             [InlineKeyboardButton(f"💡 20 ответов - $10", callback_data="buy_start")],
@@ -69,7 +74,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("invite", invite))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))  # Обработка всех текстовых сообщений
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.run_polling()
 
