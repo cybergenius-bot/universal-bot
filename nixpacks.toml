@@ -1,21 +1,17 @@
-# nixpacks.toml
-# redeploy trigger 3 — стабильная версия
-
+# nixpacks.toml — билд без pip upgrade
 
 [phases.setup]
 nixPkgs = [
-"python311",
-"python311Packages.pip",
-"git"
+  "python311",
+  "python311Packages.pip",
+  "git"
 ]
-
 
 [phases.install]
 cmds = [
-"python3.11 -m pip install --upgrade pip",
-"python3.11 -m pip install -r requirements.txt"
+  # Удалил upgrade pip — это ломает билд
+  "python3.11 -m pip install -r requirements.txt"
 ]
-
 
 [start]
 cmd = "python3.11 bot.py"
