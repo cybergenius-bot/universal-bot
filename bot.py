@@ -1,11 +1,16 @@
-import logging
 import os
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-from openai_client import openai_client  # Убедись, что у тебя это есть
-from db import get_user, has_active_subscription, decrement_messages  # Также должны быть
-from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL  # Убедись, что эти переменные определены
+from db import get_user, decrement_messages, has_active_subscription
+from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL
+from openai_api import openai_client
+
+logging.basicConfig(level=logging.INFO)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Напиши мне что-нибудь, и я отвечу!")
 
 async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = (await context.bot.get_me()).username
@@ -50,13 +55,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🧠 200 ответов - $30", callback_data="buy_standard")],
             [InlineKeyboardButton("♾️ Безлимит - $50", callback_data="buy_premium")]
         ]
-        await update.message.reply_text(
-            "❌ У тебя закончились сообщения. Выбери тариф:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Добро пожаловать! Напиши мне любой вопрос.")
+        await update.message.reply_text("❌ У тебя закончились сообщения. Выбери тариф:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
