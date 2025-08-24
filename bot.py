@@ -1,6 +1,6 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from config import TELEGRAM_TOKEN, TARIFFS, OPENAI_API_KEY, OPENAI_MODEL
 from db import get_user, decrement_messages, has_active_subscription
 import openai
@@ -16,6 +16,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"Получено сообщение от {update.effective_user.id}: {update.message.text}")
+
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     subscribed = await has_active_subscription(tg_id)
@@ -41,8 +43,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply += "\n\n📣 Поделись ботом с друзьями: https://t.me/SmartBot_OPRO_bot"
             await update.message.reply_text(reply)
         except Exception as e:
+            logging.error(f"Ошибка GPT: {e}")
             await update.message.reply_text("❌ Ошибка при обращении к GPT.")
-            print(e)
     else:
         keyboard = [
             [InlineKeyboardButton(f"💡 20 ответов - $10", callback_data="buy_start")],
