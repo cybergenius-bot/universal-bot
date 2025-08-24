@@ -1,35 +1,10 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from config import TELEGRAM_TOKEN, OPENAI_API_KEY, OPENAI_MODEL
-from db import get_user, decrement_messages, has_active_subscription
-from openai import AsyncOpenAI
-import os
-
-
-# Инициализация OpenAI GPT-4o
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
-
-logging.basicConfig(level=logging.INFO)
-
-
-# Команда /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-user = await get_user(update.effective_user.id)
-await update.message.reply_text(
-f"Привет! У тебя {user['messages_left']} сообщений. После этого нужно оплатить тариф."
-)
-
-
-# Команда /invite
 async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
 bot_username = (await context.bot.get_me()).username
 link = f"https://t.me/{bot_username}?start={update.effective_user.id}"
 await update.message.reply_text(f"🎁 Поделись этой ссылкой с друзьями:\n{link}")
 
 
-# Обработка обычных сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 logging.info("Получено сообщение: %s", update.message.text)
 tg_id = update.effective_user.id
@@ -50,9 +25,9 @@ messages=[
 {
 "role": "system",
 "content": (
-"Ты — GPT-4o, профессиональный универсальный ассистент. Ты отвечаешь на языке пользователя, будь то русский, английский, арабский и т.д."
-" Отвечай глубоко, профессионально, понятно и без ограничений по темам."
-" Ты умеешь писать код, тексты, научные и бизнес-работы, давать советы, объяснять, рассуждать."
+"Ты — GPT-4o, профессиональный универсальный ассистент. "
+"Отвечай на языке пользователя (русский, английский, арабский и т.д.), глубоко и без ограничений по темам. "
+"Ты умеешь писать код, научные и бизнес-тексты, дипломы/диссертации, делать анализ и давать инструкции."
 )
 },
 {"role": "user", "content": prompt}
@@ -61,7 +36,7 @@ temperature=0.7
 )
 reply = completion.choices[0].message.content
 await update.message.reply_text(reply)
-except Exception as e:
+except Exception:
 logging.exception("Ошибка OpenAI")
 await update.message.reply_text("❌ Ошибка при обращении к GPT.")
 else:
@@ -73,7 +48,6 @@ keyboard = [
 await update.message.reply_text("❌ У тебя закончились сообщения. Выбери тариф:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-# Запуск через Webhook
 def main():
 app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -84,7 +58,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 
 port = int(os.environ.get("PORT", 8080))
-url = os.environ.get("WEBHOOK_URL")
+url = WEBHOOK_URL or os.environ.get("WEBHOOK_URL")
 app.run_webhook(listen="0.0.0.0", port=port, webhook_url=f"{url}/bot{TELEGRAM_TOKEN}")
 
 
