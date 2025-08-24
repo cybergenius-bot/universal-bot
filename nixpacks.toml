@@ -1,4 +1,4 @@
-# nixpacks.toml — добавлены build-tools для C-расширений
+# nixpacks.toml — исправленный, без переносов строк
 
 [phases.setup]
 nixPkgs = [
@@ -10,9 +10,7 @@ nixPkgs = [
 ]
 
 [phases.install]
-cmds = [
-  "pip install --break-system-packages -r requirements.txt"
-]
+cmds = ["pip install --break-system-packages -r requirements.txt"]
 
 [start]
-cmd = "python3.11 bot.py
+cmd = "python3.11 bot.py"
