@@ -1,3 +1,4 @@
+# Redeploy trigger
 
 [phases.setup]
 nixPkgs = [
@@ -13,4 +14,4 @@ cmds = [
 ]
 
 [start]
-cmd = "python bot.py
+cmd = "python bot.py"
