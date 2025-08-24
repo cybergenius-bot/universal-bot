@@ -1,12 +1,11 @@
-# nixpacks.toml
+# nixpacks.toml — стабильный вариант для asyncpg и GPT-бота
 
 [phases.setup]
 nixPkgs = [
   "python311",
   "python311Packages.pip",
   "git",
-  "gcc",
-  "python311Packages.buildPythonPackage"
+  "gcc"
 ]
 
 [phases.install]
