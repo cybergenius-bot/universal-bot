@@ -1,5 +1,3 @@
-# nixpacks.toml
-# redeploy trigger 3 — стабильная версия
 
 
 [phases.setup]
