@@ -25,8 +25,8 @@ async def main():
     await application.run_webhook(
         listen="0.0.0.0",
         port=settings.PORT,
-        url_path=settings.TELEGRAM_TOKEN,
-        webhook_url=f"{settings.BASE_URL}/telegram/{settings.TELEGRAM_TOKEN}",
+        url_path="telegram",  # ← важно: должен совпадать с route
+        webhook_url=f"{settings.BASE_URL}/telegram",
     )
 
 
