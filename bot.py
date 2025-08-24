@@ -1,4 +1,3 @@
-import asyncio
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from config import settings
 from db import init_db
@@ -12,23 +11,23 @@ async def echo_handler(update, context):
     await update.message.reply_text(f"Вы написали: {update.message.text}")
 
 
-async def main():
-    # Инициализация БД
+async def post_init(application):
     await init_db()
 
-    # Создаём Telegram приложение
-    application = Application.builder().token(settings.TELEGRAM_TOKEN).build()
+
+def main():
+    application = Application.builder().token(settings.TELEGRAM_TOKEN).post_init(post_init).build()
+
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo_handler))
 
-    # Запуск в webhook-режиме
-    await application.run_webhook(
+    application.run_webhook(
         listen="0.0.0.0",
         port=settings.PORT,
-        url_path="telegram",  # ← важно: должен совпадать с route
+        url_path="telegram",
         webhook_url=f"{settings.BASE_URL}/telegram",
     )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
