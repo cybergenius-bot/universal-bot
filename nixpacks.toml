@@ -1,4 +1,4 @@
-# nixpacks.toml — стабильная сборка без обновления pip
+# nixpacks.toml — стабильная версия
 
 [phases.setup]
 nixPkgs = [
@@ -9,7 +9,7 @@ nixPkgs = [
 
 [phases.install]
 cmds = [
-  "python3.11 -m pip install -r requirements.txt"
+  "pip install -r requirements.txt"
 ]
 
 [start]
