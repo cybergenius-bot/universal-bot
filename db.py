@@ -9,11 +9,16 @@ db_url = settings.DATABASE_URL
 if db_url.startswith("postgresql://") and "+asyncpg" not in db_url:
     db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+# Создание асинхронного движка
 engine = create_async_engine(db_url, echo=False, future=True)
+
+# Создание сессии
 SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+# Базовый класс моделей
 Base = declarative_base()
 
-
+# Модель пользователя
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
@@ -24,7 +29,7 @@ class User(Base):
     is_unlimited = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-
+# Модель платежа
 class Payment(Base):
     __tablename__ = "payments"
     id = Column(Integer, primary_key=True, index=True)
@@ -35,7 +40,7 @@ class Payment(Base):
     provider_payment_id = Column(String, unique=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-
+# Инициализация базы данных
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
