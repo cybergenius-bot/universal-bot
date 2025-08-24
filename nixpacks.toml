@@ -1,5 +1,3 @@
-# nixpacks.toml — стабильный вариант для asyncpg и GPT-бота
-
 [phases.setup]
 nixPkgs = [
   "python311",
