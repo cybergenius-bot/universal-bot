@@ -1,46 +1,72 @@
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float
-import datetime
-from config import settings
+import asyncpg
+import asyncio
+from datetime import datetime, timedelta
+from config import DATABASE_URL, FREE_MESSAGES
 
-# Приводим DATABASE_URL к asyncpg-формату
-db_url = settings.DATABASE_URL
-if db_url.startswith("postgresql://") and "+asyncpg" not in db_url:
-    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# Создание асинхронного движка
-engine = create_async_engine(db_url, echo=False, future=True)
-
-# Создание сессии
-SessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
-# Базовый класс моделей
-Base = declarative_base()
-
-# Модель пользователя
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    tg_id = Column(Integer, unique=True, index=True)
-    lang = Column(String, default="ru")
-    free_left = Column(Integer, default=5)
-    paid_left = Column(Integer, default=0)
-    is_unlimited = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-# Модель платежа
-class Payment(Base):
-    __tablename__ = "payments"
-    id = Column(Integer, primary_key=True, index=True)
-    tg_id = Column(Integer, index=True)
-    amount = Column(Float)
-    plan = Column(String)
-    status = Column(String)
-    provider_payment_id = Column(String, unique=True)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-
-# Инициализация базы данных
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+conn = await asyncpg.connect(DATABASE_URL)
+await conn.execute("""
+CREATE TABLE IF NOT EXISTS users (
+id SERIAL PRIMARY KEY,
+tg_id BIGINT UNIQUE,
+messages_left INT DEFAULT $1,
+expires_at TIMESTAMP,
+current_plan TEXT
+);
+""", FREE_MESSAGES)
+
+
+await conn.execute("""
+CREATE TABLE IF NOT EXISTS payments (
+id SERIAL PRIMARY KEY,
+tg_id BIGINT,
+amount NUMERIC,
+tariff TEXT,
+status TEXT,
+created_at TIMESTAMP DEFAULT NOW()
+);
+""")
+await conn.close()
+
+
+async def get_user(tg_id):
+conn = await asyncpg.connect(DATABASE_URL)
+user = await conn.fetchrow("SELECT * FROM users WHERE tg_id=$1", tg_id)
+if not user:
+await conn.execute("INSERT INTO users (tg_id, messages_left) VALUES ($1, $2)", tg_id, FREE_MESSAGES)
+user = await conn.fetchrow("SELECT * FROM users WHERE tg_id=$1", tg_id)
+await conn.close()
+return user
+
+
+async def decrement_messages(tg_id):
+conn = await asyncpg.connect(DATABASE_URL)
+await conn.execute("UPDATE users SET messages_left = messages_left - 1 WHERE tg_id=$1 AND messages_left > 0", tg_id)
+await conn.close()
+
+
+async def add_messages(tg_id, count):
+conn = await asyncpg.connect(DATABASE_URL)
+await conn.execute("UPDATE users SET messages_left = messages_left + $1 WHERE tg_id=$2", count, tg_id)
+await conn.close()
+
+
+async def set_subscription(tg_id, days, plan):
+conn = await asyncpg.connect(DATABASE_URL)
+new_expiry = datetime.utcnow() + timedelta(days=days)
+await conn.execute("UPDATE users SET expires_at=$1, current_plan=$2 WHERE tg_id=$3", new_expiry, plan, tg_id)
+await conn.close()
+
+
+async def has_active_subscription(tg_id):
+conn = await asyncpg.connect(DATABASE_URL)
+result = await conn.fetchval("SELECT expires_at FROM users WHERE tg_id=$1", tg_id)
+await conn.close()
+if result and result > datetime.utcnow():
+return True
+return False
+
+
+async def save_payment(tg_id, amount, tariff, status):
+conn = await asyncpg.connect(DATABASE_URL)
