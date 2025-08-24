@@ -1,4 +1,4 @@
-# nixpacks.toml — стабильная версия
+# nixpacks.toml — стабильная версия без обновления pip
 
 [phases.setup]
 nixPkgs = [
