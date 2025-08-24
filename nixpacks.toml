@@ -1,4 +1,4 @@
-# nixpacks.toml — исправленный, без переносов строк
+# nixpacks.toml
 
 [phases.setup]
 nixPkgs = [
