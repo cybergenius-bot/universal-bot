@@ -8,9 +8,10 @@ from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL
 from openai_api import openai_client
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Напиши мне что-нибудь, и я отвечу!")
+    await update.message.reply_text("Привет! Напиши мне что-нибудь — я отвечу.")
 
 async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_username = (await context.bot.get_me()).username
@@ -18,7 +19,7 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎁 Поделись этой ссылкой с друзьями:\n{link}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info("Получено сообщение: %s", update.message.text)
+    logger.info("Получено сообщение: %s", update.message.text)
     tg_id = update.effective_user.id
     user = await get_user(tg_id)
     subscribed = await has_active_subscription(tg_id)
@@ -35,9 +36,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {
                         "role": "system",
                         "content": (
-                            "Ты — GPT-4o, профессиональный универсальный ассистент. "
-                            "Отвечай на языке пользователя (русский, английский, арабский и т.д.), глубоко и без ограничений по темам. "
-                            "Ты умеешь писать код, научные и бизнес-тексты, дипломы/диссертации, делать анализ и давать инструкции."
+                            "Ты — GPT‑4o, профессиональный ассистент. "
+                            "Отвечай на языке пользователя — многоязычно, без ограничений. "
+                            "Можешь писать код, научные тексты, диссертации, бизнес-стратегии."
                         )
                     },
                     {"role": "user", "content": prompt}
@@ -47,19 +48,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply = completion.choices[0].message.content
             await update.message.reply_text(reply)
         except Exception:
-            logging.exception("Ошибка OpenAI")
+            logger.exception("Ошибка при вызове GPT")
             await update.message.reply_text("❌ Ошибка при обращении к GPT.")
     else:
         keyboard = [
-            [InlineKeyboardButton("💡 20 ответов - $10", callback_data="buy_start")],
-            [InlineKeyboardButton("🧠 200 ответов - $30", callback_data="buy_standard")],
-            [InlineKeyboardButton("♾️ Безлимит - $50", callback_data="buy_premium")]
+            [InlineKeyboardButton("💡 20 ответов — $10", callback_data="buy_start")],
+            [InlineKeyboardButton("🧠 200 ответов — $30", callback_data="buy_standard")],
+            [InlineKeyboardButton("♾ Безлимит", callback_data="buy_premium")]
         ]
-        await update.message.reply_text("❌ У тебя закончились сообщения. Выбери тариф:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+            "У тебя закончились сообщения. Выбери тариф:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 def main():
+    logger.info("🚀 Запускаем бота...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("invite", invite))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
