@@ -1,4 +1,4 @@
-# nixpacks.toml — билд без pip upgrade
+# nixpacks.toml — стабильная сборка без обновления pip
 
 [phases.setup]
 nixPkgs = [
@@ -9,7 +9,6 @@ nixPkgs = [
 
 [phases.install]
 cmds = [
-  # Удалил upgrade pip — это ломает билд
   "python3.11 -m pip install -r requirements.txt"
 ]
 
