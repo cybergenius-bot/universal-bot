@@ -1,10 +1,12 @@
-# nixpacks.toml — используется с break-system-packages для pip
+# nixpacks.toml — добавлены build-tools для C-расширений
 
 [phases.setup]
 nixPkgs = [
   "python311",
   "python311Packages.pip",
-  "git"
+  "git",
+  "gcc",
+  "python311Packages.buildPythonPackage"
 ]
 
 [phases.install]
@@ -13,4 +15,4 @@ cmds = [
 ]
 
 [start]
-cmd = "python3.11 bot.py"
+cmd = "python3.11 bot.py
