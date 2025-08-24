@@ -1,27 +1,19 @@
 import os
-from typing import Optional
-from pydantic_settings import BaseSettings
 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-class Settings(BaseSettings):
-    # Telegram / OpenAI
-    TELEGRAM_TOKEN: str
-    OPENAI_API_KEY: str
+DATABASE_URL = os.getenv("DATABASE_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = "gpt-4o"
 
-    # PayPal (по вашим env в Railway)
-    PAYPAL_CLIENT_ID: str
-    PAYPAL_SECRET: str                       # ⚡️ соответствует Railway
-    PAYPAL_MODE: Optional[str] = "sandbox"   # "sandbox" или "live"
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox")
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
+PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET")
 
-    # База данных (Railway создаёт DATABASE_URL)
-    DATABASE_URL: str = "sqlite+aiosqlite:///./bot.db"
+FREE_MESSAGES = 5
 
-    # URL / Webhook
-    BASE_URL: str = os.getenv("RAILWAY_STATIC_URL", "http://localhost:8000")
-    WEBHOOK_URL: Optional[str] = os.getenv("WEBHOOK_URL", None)
-
-    # Порт (Railway задаёт PORT)
-    PORT: int = int(os.getenv("PORT", 8000))
-
-
-settings = Settings()
+TARIFFS = {
+    "start": {"price": 10, "messages": 20, "expires_days": None},
+    "standard": {"price": 30, "messages": 200, "expires_days": None},
+    "premium": {"price": 50, "messages": None, "expires_days": 30},
+}
