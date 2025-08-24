@@ -1,4 +1,4 @@
-# nixpacks.toml — стабильная версия без обновления pip
+# nixpacks.toml — используется с break-system-packages для pip
 
 [phases.setup]
 nixPkgs = [
@@ -9,7 +9,7 @@ nixPkgs = [
 
 [phases.install]
 cmds = [
-  "pip install -r requirements.txt"
+  "pip install --break-system-packages -r requirements.txt"
 ]
 
 [start]
