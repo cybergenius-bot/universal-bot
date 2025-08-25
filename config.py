@@ -1,14 +1,37 @@
-import os
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = "gpt-4o"
 FREE_MESSAGES = 20
+"""Application configuration using Pydantic settings."""
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+from __future__ import annotations
 
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
-PAYPAL_SECRET = os.getenv("PAYPAL_SECRET")
-PAYPAL_MODE = os.getenv("PAYPAL_MODE")
-BASE_URL = os.getenv("BASE_URL")
+try:  # Pydantic v2
+    from pydantic_settings import BaseSettings
+except Exception:  # pragma: no cover - fallback for Pydantic v1
+    from pydantic import BaseSettings
+
+
+class Settings(BaseSettings):
+    """Runtime configuration loaded from environment variables."""
+
+    TELEGRAM_TOKEN: str | None = None
+    WEBHOOK_URL: str | None = None
+    OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str = "gpt-4o"
+    FREE_MESSAGES: int = 20
+    DATABASE_URL: str | None = None
+
+    PAYPAL_CLIENT_ID: str | None = None
+    PAYPAL_SECRET: str | None = None
+    PAYPAL_MODE: str = "sandbox"
+    BASE_URL: str | None = None
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+# Singleton settings instance
+settings = Settings()
