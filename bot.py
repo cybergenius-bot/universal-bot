@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import openai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from db import get_user, decrement_messages, has_active_subscription
 from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL, OPENAI_API_KEY, FREE_MESSAGES
@@ -24,15 +24,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("🆕 Message received: %s", update.message.text)
     await update.message.reply_text("✅ Got your message!")  # Тестовый ответ
 
-    # Здесь можно возвращать логику GPT-4o и тарификации
-
 def launch_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("invite", invite))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
 
 async def main():
@@ -40,10 +36,17 @@ async def main():
     await app.initialize()
     await app.start()
 
-    path = f"/webhook/{TELEGRAM_TOKEN}"
-    await app.bot.set_webhook(WEBHOOK_URL + path)
+    # Убедись, что WEBHOOK_URL начинается с https:// и не содержит слеш в конце
+    webhook_path = f"/webhook/{TELEGRAM_TOKEN}"
+    full_webhook_url = WEBHOOK_URL.rstrip("/") + webhook_path
+
+    await app.bot.set_webhook(full_webhook_url)
+    logger.info("🚀 Webhook set to: %s", full_webhook_url)
+
     await app.updater.start_webhook(
-        listen="0.0.0.0", port=int(os.getenv("PORT", "8080")), url_path=path
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
+        url_path=webhook_path
     )
 
     await app.updater.idle()
