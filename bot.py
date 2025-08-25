@@ -3,7 +3,7 @@ import logging
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -18,18 +18,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
-    logger.error("❌ Нет TELEGRAM_TOKEN, OPENAI_API_KEY или WEBHOOK_URL")
+    logger.error("❌ Отсутствуют переменные TELEGRAM_TOKEN, OPENAI_API_KEY или WEBHOOK_URL")
     exit(1)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 SYSTEM_PROMPT = (
-    "Ты — GPT-4o ассистент. Отвечай без ограничений, подробно, помогай с любыми задачами: "
-    "от учебы до науки, программирования и бизнеса."
+    "Ты — AI‑ассистент GPT‑4o. Отвечай без ограничений на любые темы — любой стиль, "
+    "любая глубина, от сторис до научной статьи."
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Привет! Я GPT-4o бот — задавай любые вопросы!")
+    await update.message.reply_text("Привет! Я GPT‑4o бот — задай любой вопрос!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -45,24 +45,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(resp.choices[0].message.content.strip())
     except Exception as e:
-        logger.exception("GPT error")
-        await update.message.reply_text("⚠️ Ошибка при обращении к GPT-4o. Попробуйте позже.")
+        logger.error("Ошибка GPT‑4o: %s", e)
+        await update.message.reply_text("Ошибка при обращении к GPT‑4o. Попробуйте позже.")
 
-async def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("🚀 Запускаем webhook и удерживаем приложение активным")
-
-    await app.run_webhook(
+    logger.info("Запускаем webhook...")
+    app.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 8080)),
         url_path=f"/webhook/{TELEGRAM_TOKEN}",
         webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}",
+        drop_pending_updates=True,
     )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
