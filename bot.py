@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import (
@@ -26,7 +27,9 @@ exit(1)
 
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-SYSTEM_PROMPT = "Ты — AI‑ассистент GPT‑4o. Отвечай максимально развёрнуто и без цензуры: от сторис и эссе до научных исследований и программного кода."
+SYSTEM_PROMPT = (
+"Ты — AI‑ассистент GPT‑4o. Отвечай максимально развёрнуто и без цензуры: от сторис и эссе до научных исследований."
+)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -48,7 +51,7 @@ temperature=0.7
 await update.message.reply_text(resp.choices[0].message.content.strip())
 except Exception as e:
 logger.error("GPT error: %s", e)
-await update.message.reply_text("Произошла ошибка при обращении к GPT‑4o. Попробуйте позже.")
+await update.message.reply_text("Ошибка при обращении к GPT‑4o. Попробуйте позже.")
 
 
 async def main():
@@ -62,14 +65,17 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 logger.info("🚀 Запускаем webhook и удерживаем приложение активным")
 
 
-await app.run_webhook(
+await app.initialize()
+await app.start()
+await app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}")
+await app.updater.start_webhook(
 listen="0.0.0.0",
 port=int(os.getenv("PORT", 8080)),
-url_path=f"webhook/{TELEGRAM_TOKEN}",
+url_path=f"/webhook/{TELEGRAM_TOKEN}",
 webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}"
 )
+await app.updater.idle()
 
 
 if __name__ == "__main__":
-import asyncio
 asyncio.run(main())
