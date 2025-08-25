@@ -24,18 +24,19 @@ if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 SYSTEM_PROMPT = (
-    "Ты — AI-ассистент GPT-4o. Отвечай максимально развёрнуто — от сторис до научных работ."
+    "Ты — AI-ассистент GPT-4o. Отвечай максимально развёрнуто и без цензуры: "
+    "пиши как хороший собеседник, помогай с текстами, сторис, конспектами и даже научными работами."
 )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("🚀 Получен /start от %s", update.effective_user.username)
-    await update.message.reply_text("Привет! Я GPT-4o бот. Спрашивай что угодно.")
+    await update.message.reply_text("Привет! Я GPT-4o бот. Спрашивай что угодно!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     logger.info("📩 Сообщение от %s: %s", update.effective_user.username, user_text)
 
-    # Пробный ответ, чтобы убедиться что бот жив
+    # Проверка что хэндлер работает
     await update.message.reply_text("✅ Я живой! Обрабатываю твой запрос...")
 
     try:
