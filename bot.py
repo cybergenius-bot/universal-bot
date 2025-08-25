@@ -7,6 +7,7 @@ import openai
 from db import get_user, decrement_messages, has_active_subscription
 from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL, OPENAI_API_KEY
 
+# Настройка логов
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {
                         "role": "system",
                         "content": (
-                            "Ты — GPT-4o, профессиональный универсальный ассистент. "
-                            "Отвечай на языке пользователя (русский, английский, арабский и т.д.), глубоко и без ограничений по темам. "
-                            "Ты умеешь писать код, научные и бизнес-тексты, дипломы/диссертации, делать анализ и давать инструкции."
+                            "Ты — GPT-4o, универсальный ассистент. "
+                            "Отвечай на языке пользователя (русский, английский, арабский и т.д.), "
+                            "глубоко и без ограничений по темам. "
+                            "Пиши код, научные и бизнес-тексты, дипломы, делай анализ и инструкции."
                         )
                     },
                     {"role": "user", "content": prompt}
