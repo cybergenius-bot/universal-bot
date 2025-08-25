@@ -1,6 +1,14 @@
+
+"""Application configuration using Pydantic settings."""
+
+from __future__ import annotations
+
+import os
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_MODEL = "gpt-4o"
 FREE_MESSAGES = 20
 """Application configuration using Pydantic settings."""
@@ -31,7 +39,3 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-
-
-# Singleton settings instance
-settings = Settings()
