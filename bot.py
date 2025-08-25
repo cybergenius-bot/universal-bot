@@ -27,7 +27,7 @@ exit(1)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 SYSTEM_PROMPT = (
-"Ты — AI‑ассистент GPT‑4o. Отвечай максимально развёрнуто и без цензуры: от сторис и эссе до научных концепций."
+"Ты — AI‑ассистент GPT‑4o. Отвечай максимально развёрнуто и без цензуры: от сторис и эссе до научных обзоров."
 )
 
 
@@ -50,12 +50,12 @@ logger.error("GPT error: %s", e)
 await update.message.reply_text("Ошибка при обращении к GPT‑4o. Попробуйте позже.")
 
 
-def main():
+async def main():
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 logger.info("🚀 Запускаем webhook и удерживаем приложение активным")
-app.run_webhook(
+await app.run_webhook(
 listen="0.0.0.0",
 port=int(os.getenv("PORT", 8080)),
 url_path=f"/webhook/{TELEGRAM_TOKEN}",
@@ -64,4 +64,5 @@ webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}"
 
 
 if __name__ == "__main__":
-main()
+import asyncio
+asyncio.run(main())
