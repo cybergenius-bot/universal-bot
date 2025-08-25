@@ -55,6 +55,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ],
             max_tokens=2048,
             temperature=0.8
+            temperature=0.8,
         )
         reply = resp.choices[0].message.content.strip()
         await update.message.reply_text(reply)
