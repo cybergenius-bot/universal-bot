@@ -1,6 +1,3 @@
-+14
--7
-
 import os
 import logging
 from openai import OpenAI
