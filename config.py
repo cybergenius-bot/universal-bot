@@ -38,3 +38,14 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+
+
+settings = Settings()
+
+# Export individual settings for backward compatibility
+TELEGRAM_TOKEN = settings.TELEGRAM_TOKEN
+WEBHOOK_URL = settings.WEBHOOK_URL
+OPENAI_API_KEY = settings.OPENAI_API_KEY
+DATABASE_URL = settings.DATABASE_URL
+OPENAI_MODEL = settings.OPENAI_MODEL
+FREE_MESSAGES = settings.FREE_MESSAGES
