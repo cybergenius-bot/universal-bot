@@ -1,4 +1,3 @@
-
 """Application configuration using Pydantic settings."""
 
 from __future__ import annotations
