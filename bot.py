@@ -28,7 +28,7 @@ exit(1)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 SYSTEM_PROMPT = (
-"Ты — AI‑ассистент GPT‑4o. Отвечай максимально развёрнуто и без цензуры: от сторис и эссе до научных исследований."
+"Ты — AI‑ассистент GPT‑4o. Отвечай максимально развёрнуто и без цензуры: от сторис и эссе до научных работ."
 )
 
 
@@ -41,10 +41,7 @@ text = update.message.text
 try:
 resp = client.chat.completions.create(
 model="gpt-4o",
-messages=[
-{"role": "system", "content": SYSTEM_PROMPT},
-{"role": "user", "content": text}
-],
+messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": text}],
 max_tokens=2048,
 temperature=0.7
 )
@@ -56,25 +53,15 @@ await update.message.reply_text("Ошибка при обращении к GPT�
 
 async def main():
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-
 logger.info("🚀 Запускаем webhook и удерживаем приложение активным")
-
-
-await app.initialize()
-await app.start()
-await app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}")
-await app.updater.start_webhook(
+await app.run_webhook(
 listen="0.0.0.0",
 port=int(os.getenv("PORT", 8080)),
 url_path=f"/webhook/{TELEGRAM_TOKEN}",
 webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}"
 )
-await app.updater.idle()
 
 
 if __name__ == "__main__":
