@@ -10,7 +10,10 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters
+    filters,
 )
+
+# Асинхронный Telegram-бот, использующий GPT-4o для ответов
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
