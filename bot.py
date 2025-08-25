@@ -1,70 +1,56 @@
-# bot.py
 import os
 import logging
 import asyncio
 import openai
 from telegram import Update
-from telegram.ext import (
-Application, CommandHandler, MessageHandler, filters, ContextTypes
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-
-# Настройки логгирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-# Конфигурация токенов
+# Токены
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") # например, Railway или Render
 
-
-# Настройка клиента OpenAI
+# Клиент OpenAI
 openai.api_key = OPENAI_API_KEY
-
 
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text("Привет! Я — бот с GPT-4.0. Задай мне любой вопрос.")
+    await update.message.reply_text("👋 Привет! Я бот на GPT-4.0. Задай мне любой вопрос!")
 
-
-# Обработка сообщений пользователя
+# Ответ на сообщения
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-user_message = update.message.text
-logger.info("Received message: %s", user_message)
+    user_text = update.message.text
+    logger.info("📩 User: %s", user_text)
 
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-4.0",
+            messages=[{"role": "user", "content": user_text}],
+            max_tokens=800,   # расширенные ответы
+            temperature=0.8
+        )
 
-try:
-response = openai.ChatCompletion.create(
-model="gpt-4",
-messages=[{"role": "user", "content": user_message}]
-)
-reply_text = response.choices[0].message.content.strip()
-except Exception as e:
-logger.error("OpenAI error: %s", e)
-reply_text = "Произошла ошибка при обращении к GPT-4.0. Попробуйте позже."
+        bot_reply = response.choices[0].message.content
+        await update.message.reply_text(bot_reply)
 
+    except Exception as e:
+        logger.error("Ошибка GPT: %s", e)
+        await update.message.reply_text("⚠️ Ошибка при запросе к GPT-4.0.")
 
-await update.message.reply_text(reply_text)
+def launch_bot():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# Запуск бота
-def main():
-app = Application.builder().token(TELEGRAM_TOKEN).build()
+    return app
 
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-
-logger.info("Starting bot...")
-app.run_webhook(
-listen="0.0.0.0",
-port=int(os.getenv("PORT", 8080)),
-webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}"
-)
-
+async def main():
+    app = launch_bot()
+    await app.run_polling()
 
 if __name__ == "__main__":
-asyncio.run(main())
+    asyncio.run(main())
