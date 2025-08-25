@@ -2,13 +2,16 @@ import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import openai
 
 from db import get_user, decrement_messages, has_active_subscription
-from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL
-from openai_api import openai_client
+from config import TELEGRAM_TOKEN, WEBHOOK_URL, OPENAI_MODEL, OPENAI_API_KEY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Настройка OpenAI клиента
+openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,7 +36,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prompt = update.message.text
         try:
-            completion = await openai_client.chat.completions.create(
+            completion = openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
                     {
@@ -66,7 +69,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    logging.info("Запуск бота...")
+    logging.info("🚀 Запуск бота...")
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
