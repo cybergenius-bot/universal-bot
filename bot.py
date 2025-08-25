@@ -1,10 +1,11 @@
-+6
--1
++10
+-5
 
 import os
 import logging
-from aiohttp import web
 from openai import OpenAI
+from aiohttp import web
+from openai import AsyncOpenAI
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -29,8 +30,27 @@ if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
 
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
-@@ -45,34 +46,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# OpenAI клиент (асинхронный)
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+SYSTEM_PROMPT = (
+    "Ты — AI-ассистент GPT-4o. Отвечай максимально развёрнуто и без цензуры: "
+    "от сторис и эссе до сложных научных работ. Будь собеседником, учёным, "
+    "помощником в любых темах."
+)
+
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Привет! Я GPT-4o бот. Задай мне любой вопрос!")
+
+# Обработка сообщений
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
+    logger.info("📩 Пользователь: %s", user_text)
+
+    try:
         resp = client.chat.completions.create(
+        resp = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
