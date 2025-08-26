@@ -17,16 +17,15 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# ✅ Исправленный блок с правильными отступами
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
     logger.error("Необходимо задать TELEGRAM_TOKEN, OPENAI_API_KEY и WEBHOOK_URL")
     exit(1)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
-SYSTEM_PROMPT = "Ты — AI-ассистент GPT-4o. Помогай подробно и без ограничений."
+SYSTEM_PROMPT = "Ты — AI‑ассистент GPT‑4o. Помогай подробно и без ограничений."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я GPT-4o бот. Задай вопрос!")
+    await update.message.reply_text("Привет! Я GPT‑4o бот. Задай вопрос!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
@@ -43,8 +42,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(rsp.choices[0].message.content.strip())
     except Exception as e:
-        logger.error("Ошибка GPT-4o: %s", e)
-        await update.message.reply_text("Ошибка GPT-4o. Попробуй позже.")
+        logger.error("Ошибка GPT‑4o: %s", e)
+        await update.message.reply_text("Ошибка GPT‑4o. Попробуй позже.")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
