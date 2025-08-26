@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 from pydantic import BaseSettings
 
+try:  # Pydantic v2
+    from pydantic_settings import BaseSettings
+except Exception:  # pragma: no cover - fallback for Pydantic v1
+    from pydantic import BaseSettings
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
