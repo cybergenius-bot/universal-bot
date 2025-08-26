@@ -13,6 +13,10 @@ FREE_MESSAGES = 20
 """Application configuration using Pydantic settings."""
 
 from __future__ import annotations
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
+PAYPAL_SECRET = os.getenv("PAYPAL_SECRET")
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox")
+BASE_URL = os.getenv("BASE_URL")
 
 try:  # Pydantic v2
     from pydantic_settings import BaseSettings
@@ -49,3 +53,7 @@ OPENAI_API_KEY = settings.OPENAI_API_KEY
 DATABASE_URL = settings.DATABASE_URL
 OPENAI_MODEL = settings.OPENAI_MODEL
 FREE_MESSAGES = settings.FREE_MESSAGES
+PAYPAL_CLIENT_ID = settings.PAYPAL_CLIENT_ID
+PAYPAL_SECRET = settings.PAYPAL_SECRET
+PAYPAL_MODE = settings.PAYPAL_MODE
+BASE_URL = settings.BASE_URL
