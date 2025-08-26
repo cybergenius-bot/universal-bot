@@ -38,3 +38,6 @@ class Settings(BaseSettings):
     PAYPAL_SECRET: str | None = None
     PAYPAL_MODE: str = "sandbox"
     BASE_URL: str | None = None
+
+
+settings = Settings()
