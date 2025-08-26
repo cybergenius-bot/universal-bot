@@ -1,43 +1,29 @@
-import os
-"""Telegram bot using AsyncOpenAI and aiohttp webhook."""
-
 import logging
-from openai import OpenAI
 import os
 
 from aiohttp import web
 from openai import AsyncOpenAI
-from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    MessageHandler,
     ContextTypes,
-    filters
     MessageHandler,
     filters,
 )
 
-# Асинхронный Telegram-бот, использующий GPT-4o для ответов
+from config import settings
 
-# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TELEGRAM_TOKEN = settings.TELEGRAM_TOKEN
+OPENAI_API_KEY = settings.OPENAI_API_KEY
+WEBHOOK_URL = settings.WEBHOOK_URL
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
-    logger.error("Отсутствуют TELEGRAM_TOKEN, OPENAI_API_KEY или WEBHOOK_URL")
-    exit(1)
-    raise SystemExit(1)
+    raise SystemExit("Missing TELEGRAM_TOKEN, OPENAI_API_KEY or WEBHOOK_URL")
 
-# OpenAI клиент
-client = OpenAI(api_key=OPENAI_API_KEY)
-# OpenAI клиент (асинхронный)
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 SYSTEM_PROMPT = (
@@ -46,54 +32,35 @@ SYSTEM_PROMPT = (
     "помощником в любых темах."
 )
 
-# Команда /start
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     await update.message.reply_text("👋 Привет! Я GPT-4o бот. Задай мне любой вопрос!")
 
-# Обработка сообщений
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Respond to user messages via OpenAI Chat Completions."""
     user_text = update.message.text
     logger.info("📩 Пользователь: %s", user_text)
-
     try:
-        resp = client.chat.completions.create(
         resp = await client.chat.completions.create(
-            model="gpt-4o",
+            model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_text}
                 {"role": "user", "content": user_text},
             ],
             max_tokens=2048,
-            temperature=0.8
             temperature=0.8,
         )
         reply = resp.choices[0].message.content.strip()
         await update.message.reply_text(reply)
-
-    except Exception as e:
-        logger.error("❌ Ошибка GPT: %s", e)
     except Exception as exc:  # pragma: no cover - network errors
         logger.error("❌ Ошибка GPT: %s", exc)
-        await update.message.reply_text("⚠️ Ошибка при обращении к GPT-4o. Попробуй позже.")
+        await update.message.reply_text("⚠️ Ошибка при обращении к GPT. Попробуй позже.")
 
-# Запуск
-
-def main():
 def main() -> None:
     """Start the Telegram bot using webhook mode."""
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("🚀 Запускаем webhook и удерживаем приложение активным")
 
     web_app = web.Application()
     web_app.router.add_get("/", lambda request: web.Response(text="ok"))
@@ -102,11 +69,9 @@ def main() -> None:
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 8080)),
         url_path=f"/webhook/{TELEGRAM_TOKEN}",
-        webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}"
         webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}",
         webhook_app=web_app,
     )
-
 
 if __name__ == "__main__":
     main()
