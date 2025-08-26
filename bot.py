@@ -1,6 +1,10 @@
 import os
+"""Telegram bot using AsyncOpenAI and aiohttp webhook."""
+
 import logging
 from openai import OpenAI
+import os
+
 from aiohttp import web
 from openai import AsyncOpenAI
 from aiohttp import web
@@ -11,6 +15,7 @@ from telegram.ext import (
     MessageHandler,
     ContextTypes,
     filters
+    MessageHandler,
     filters,
 )
 
@@ -28,6 +33,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
     logger.error("Отсутствуют TELEGRAM_TOKEN, OPENAI_API_KEY или WEBHOOK_URL")
     exit(1)
+    raise SystemExit(1)
 
 # OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -43,11 +49,15 @@ SYSTEM_PROMPT = (
 # Команда /start
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command."""
     await update.message.reply_text("👋 Привет! Я GPT-4o бот. Задай мне любой вопрос!")
 
 # Обработка сообщений
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Respond to user messages via OpenAI Chat Completions."""
     user_text = update.message.text
     logger.info("📩 Пользователь: %s", user_text)
 
@@ -58,6 +68,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text}
+                {"role": "user", "content": user_text},
             ],
             max_tokens=2048,
             temperature=0.8
@@ -68,11 +79,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error("❌ Ошибка GPT: %s", e)
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.error("❌ Ошибка GPT: %s", exc)
         await update.message.reply_text("⚠️ Ошибка при обращении к GPT-4o. Попробуй позже.")
 
 # Запуск
 
 def main():
+def main() -> None:
+    """Start the Telegram bot using webhook mode."""
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
