@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pydantic import BaseSettings
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
