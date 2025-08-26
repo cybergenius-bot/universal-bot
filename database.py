@@ -1,12 +1,16 @@
+"""Database helper functions using asyncpg."""
+
 import os
 import psycopg2
 from datetime import datetime, timedelta
+from typing import Optional, Tuple
 
 import asyncpg
 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pool: asyncpg.Pool | None = None
+pool: Optional[asyncpg.Pool] = None
 
 
 async def init_db() -> None:
@@ -23,10 +27,12 @@ async def init_db() -> None:
                 expires TIMESTAMP
             );
             """
+            """,
         )
 
 
 async def get_user(user_id: int):
+async def get_user(user_id: int) -> Tuple[int, str, Optional[datetime]]:
     """Return user usage info, creating a record if necessary."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -147,6 +153,7 @@ async def check_expired(user_id: int) -> None:
 
 async def close_db() -> None:
     """Close the connection pool."""
+    global pool
     if pool is not None:
         await pool.close()
-
+        pool = None
