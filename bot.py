@@ -3,6 +3,7 @@ import logging
 from openai import OpenAI
 from aiohttp import web
 from openai import AsyncOpenAI
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -40,10 +41,12 @@ SYSTEM_PROMPT = (
 )
 
 # Команда /start
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Привет! Я GPT-4o бот. Задай мне любой вопрос!")
 
 # Обработка сообщений
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     logger.info("📩 Пользователь: %s", user_text)
@@ -68,6 +71,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Ошибка при обращении к GPT-4o. Попробуй позже.")
 
 # Запуск
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
@@ -87,6 +91,7 @@ def main():
         webhook_url=f"{WEBHOOK_URL}/webhook/{TELEGRAM_TOKEN}",
         webhook_app=web_app,
     )
+
 
 if __name__ == "__main__":
     main()
