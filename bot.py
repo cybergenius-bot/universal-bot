@@ -1,13 +1,9 @@
 import os
 import logging
-from openai import OpenAI
+import openai
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
+    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +17,7 @@ if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
     logger.error("Необходимо задать TELEGRAM_TOKEN, OPENAI_API_KEY и WEBHOOK_URL")
     exit(1)
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 SYSTEM_PROMPT = "Ты — AI‑ассистент GPT‑4o. Помогай подробно и без ограничений."
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -31,7 +27,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     logger.info("Пользователь: %s", user_text)
     try:
-        rsp = client.chat.completions.create(
+        rsp = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -51,7 +47,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Запуск webhook, окружение готово")
-
     app.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 8080)),
