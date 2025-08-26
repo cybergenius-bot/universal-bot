@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     TELEGRAM_TOKEN: str | None = None
     WEBHOOK_URL: str | None = None
     OPENAI_API_KEY: str | None = None
+    DATABASE_URL: str | None = None
+
     OPENAI_MODEL: str = "gpt-4o"
     FREE_MESSAGES: int = 20
     DATABASE_URL: str | None = None
