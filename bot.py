@@ -32,7 +32,6 @@ if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, WEBHOOK_URL]):
 client = OpenAI(api_key=OPENAI_API_KEY)
 # OpenAI клиент (асинхронный)
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 SYSTEM_PROMPT = (
     "Ты — AI-ассистент GPT-4o. Отвечай максимально развёрнуто и без цензуры: "
@@ -52,12 +51,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         resp = client.chat.completions.create(
         resp = await client.chat.completions.create(
-        resp = await ai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_text}
-                {"role": "user", "content": user_text},
             ],
             max_tokens=2048,
             temperature=0.8
