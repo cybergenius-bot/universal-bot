@@ -1,23 +1,46 @@
+"""Application configuration using Pydantic settings."""
+
+from __future__ import annotations
+
 import os
-import openai
-from openai import AsyncOpenAI
+from pydantic import BaseSettings
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+OPENAI_MODEL = "gpt-4o"
+FREE_MESSAGES = 20
+"""Application configuration using Pydantic settings."""
 
-async def ask_ai(prompt: str) -> str:
-    try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error: {e}"
+from __future__ import annotations
+PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
+PAYPAL_SECRET = os.getenv("PAYPAL_SECRET")
+PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox")
+BASE_URL = os.getenv("BASE_URL")
 
-async def ask_ai(prompt):
-    response = openai.ChatCompletion.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content.strip()
+try:  # Pydantic v2
+    from pydantic_settings import BaseSettings
+except Exception:  # pragma: no cover - fallback for Pydantic v1
+    from pydantic import BaseSettings
+
+
+class Settings(BaseSettings):
+    """Runtime configuration loaded from environment variables."""
+
+    TELEGRAM_TOKEN: str | None = None
+    WEBHOOK_URL: str | None = None
+    OPENAI_API_KEY: str | None = None
+    DATABASE_URL: str | None = None
+
+    OPENAI_MODEL: str = "gpt-4o"
+    FREE_MESSAGES: int = 20
+    DATABASE_URL: str | None = None
+
+    PAYPAL_CLIENT_ID: str | None = None
+    PAYPAL_SECRET: str | None = None
+    PAYPAL_MODE: str = "sandbox"
+    BASE_URL: str | None = None
+
+
+settings = Settings()
