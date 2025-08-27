@@ -1,67 +1,89 @@
-# bot.py
 import os
-import logging
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from openai import OpenAI
-from database import cursor, conn  # импортируем подключение из database.py
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Переменные окружения
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+now = datetime.datetime.utcnow()
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise ValueError("Отсутствует TELEGRAM_TOKEN или OPENAI_API_KEY")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+if result is None:
+cursor.execute("INSERT INTO users (id) VALUES (%s)", (user_id,))
+conn.commit()
+return True
 
-LIMIT_FREE = 5
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я GPT‑4o бот. Задай свой вопрос!")
+message_count, limit_type, last_reset = result
 
+
+# Сброс лимитов каждые 24 часа для free пользователей
+if limit_type == 'free' and (now - last_reset).total_seconds() > 86400:
+cursor.execute("UPDATE users SET message_count = 0, last_reset = %s WHERE id = %s", (now, user_id))
+conn.commit()
+return True
+
+
+# Ограничения
+limits = {
+'free': 5,
+'basic': 20,
+'pro': 200,
+'unlimited': float('inf')
+}
+
+
+return message_count < limits.get(limit_type, 5)
+
+
+# Увеличение счётчика сообщений
+def increment_usage(user_id: int):
+cursor.execute("UPDATE users SET message_count = message_count + 1 WHERE id = %s", (user_id,))
+conn.commit()
+
+
+# Обработка сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-    logger.info(f"Пользователь {user_id}: {text}")
+user_id = update.effective_user.id
+user_message = update.message.text
 
-    cursor.execute("SELECT usage_count FROM user_limits WHERE user_id = %s", (user_id,))
-    row = cursor.fetchone()
-    count = row[0] if row else 0
 
-    if count >= LIMIT_FREE:
-        await update.message.reply_text("Вы использовали бесплатный лимит. Подписка нужна.")
-        return
+if not await check_limit(user_id):
+await update.message.reply_text("Вы превысили лимит запросов. Пожалуйста, оформите подписку.")
+return
 
-    if row:
-        cursor.execute("UPDATE user_limits SET usage_count = usage_count + 1 WHERE user_id = %s", (user_id,))
-    else:
-        cursor.execute("INSERT INTO user_limits (user_id, usage_count) VALUES (%s, 1)", (user_id,))
-    conn.commit()
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": text}]
-        )
-        answer = response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"Ошибка GPT‑4o: {e}")
-        answer = "Ошибка GPT‑4o. Попробуй позже."
+openai.api_key = OPENAI_API_KEY
 
-    await update.message.reply_text(answer)
 
-def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+try:
+response = openai.ChatCompletion.create(
+model="gpt-4o",
+messages=[{"role": "user", "content": user_message}]
+)
+bot_reply = response.choices[0].message.content
+await update.message.reply_text(bot_reply)
+increment_usage(user_id)
 
-    logger.info("Бот запущен и ожидает сообщений…")
-    app.run_polling()
 
-if __name__ == "__main__":
-    main()
+except Exception as e:
+logger.error(f"Ошибка GPT: {e}")
+await update.message.reply_text("Произошла ошибка при обращении к GPT-4o. Попробуйте позже.")
+
+
+# Обработка /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.message.reply_text("Привет! Я GPT‑4o бот. Задай вопрос!")
+
+
+# Запуск бота
+if __name__ == '__main__':
+if not TELEGRAM_TOKEN or not OPENAI_API_KEY or not DATABASE_URL:
+raise ValueError("Отсутствует TELEGRAM_TOKEN, OPENAI_API_KEY или DATABASE_URL")
+
+
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+
+logger.info("Бот запущен")
+app.run_polling()
