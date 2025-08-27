@@ -1,97 +1,90 @@
-import logging
 import os
+import logging
+import asyncio
 import sqlite3
-from telegram import Update, BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from datetime import datetime
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
 
 
-# Логгирование
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Настройки из переменных окружения
+# Переменные окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-GPT_MODEL = "gpt-4o"
 
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
 raise ValueError("Отсутствует TELEGRAM_TOKEN или OPENAI_API_KEY")
 
 
+# OpenAI клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# База данных
-conn = sqlite3.connect("users.db")
+# SQLite база
+conn = sqlite3.connect("usage.db")
 cursor = conn.cursor()
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS usage (
 user_id INTEGER PRIMARY KEY,
-questions_left INTEGER DEFAULT 5
+count INTEGER DEFAULT 0,
+updated_at TEXT
 )
-''')
+""")
 conn.commit()
 
 
-# Обработка команды /start
+LIMIT_FREE = 5
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-user_id = update.effective_user.id
-cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-conn.commit()
 await update.message.reply_text("Привет! Я GPT‑4o бот. Задай вопрос!")
 
 
-# Обработка сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 user_id = update.effective_user.id
-cursor.execute("SELECT questions_left FROM users WHERE user_id = ?", (user_id,))
+message = update.message.text.strip()
+logger.info(f"Пользователь: {message}")
+
+
+cursor.execute("SELECT count FROM usage WHERE user_id = ?", (user_id,))
 row = cursor.fetchone()
-if row is None:
-questions_left = 5
-cursor.execute("INSERT INTO users (user_id, questions_left) VALUES (?, ?)", (user_id, questions_left))
-conn.commit()
-else:
-questions_left = row[0]
+count = row[0] if row else 0
 
 
-if questions_left <= 0:
-await update.message.reply_text("Вы исчерпали лимит. Пополните баланс для продолжения.")
+if count >= LIMIT_FREE:
+await update.message.reply_text("Вы исчерпали бесплатный лимит. Для продолжения — оформите подписку.")
 return
-
-
-cursor.execute("UPDATE users SET questions_left = questions_left - 1 WHERE user_id = ?", (user_id,))
-conn.commit()
 
 
 try:
 response = client.chat.completions.create(
-model=GPT_MODEL,
-messages=[{"role": "user", "content": update.message.text}]
+model="gpt-4o",
+messages=[{"role": "user", "content": message}]
 )
-answer = response.choices[0].message.content
+answer = response.choices[0].message.content.strip()
 except Exception as e:
-logger.error(f"Ошибка GPT: {e}")
+logger.error(f"Ошибка GPT‑4o: {e}")
 answer = "Ошибка GPT‑4o. Попробуй позже."
 
 
 await update.message.reply_text(answer)
 
 
-# Запуск бота
-async def main():
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+if row:
+cursor.execute("UPDATE usage SET count = count + 1, updated_at = ? WHERE user_id = ?", (datetime.now(), user_id))
+else:
+cursor.execute("INSERT INTO usage (user_id, count, updated_at) VALUES (?, 1, ?)", (user_id, datetime.now()))
+conn.commit()
 
 
+if __name__ == "__main__":
+app = Application.builder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-
-
-await app.run_polling()
-
-
-if __name__ == '__main__':
-import asyncio
-asyncio.run(main())
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.run_polling()
