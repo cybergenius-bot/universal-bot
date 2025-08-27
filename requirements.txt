@@ -3,5 +3,4 @@ uvicorn
 python-telegram-bot[webhooks]==20.7
 psycopg2-binary
 openai
-openai>=1.0.0
-psycopg2-binary
+
