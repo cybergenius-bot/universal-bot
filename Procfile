@@ -1,1 +1,1 @@
-web: python3.11 bot.py
+start = "uvicorn main:app --host 0.0.0.0 --port $PORT"
