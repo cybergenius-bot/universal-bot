@@ -1,90 +1,91 @@
-import logging
 import os
+import logging
+import asyncio
+import psycopg2
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
-import psycopg2
-
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-# Получение токенов и ключей
+# Переменные окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-
+# Проверка
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-raise ValueError("Отсутствует TELEGRAM_TOKEN или OPENAI_API_KEY")
+    raise ValueError("Отсутствует TELEGRAM_TOKEN или OPENAI_API_KEY")
 
-
-# Инициализация OpenAI клиента
+# Инициализация клиентов
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 
 # Подключение к PostgreSQL
 conn = psycopg2.connect(
-dbname=os.getenv("PGDATABASE"),
-user=os.getenv("PGUSER"),
-password=os.getenv("PGPASSWORD"),
-host=os.getenv("PGHOST"),
-port=os.getenv("PGPORT")
+    dbname=os.getenv("PGDATABASE"),
+    user=os.getenv("PGUSER"),
+    password=os.getenv("PGPASSWORD"),
+    host=os.getenv("PGHOST"),
+    port=os.getenv("PGPORT")
 )
 cursor = conn.cursor()
-
-
-# Создание таблицы, если нет
-cursor.execute('''
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS user_limits (
-user_id BIGINT PRIMARY KEY,
-usage_count INT DEFAULT 0
+    user_id BIGINT PRIMARY KEY,
+    usage_count INTEGER DEFAULT 0
 )
-''')
+""")
 conn.commit()
 
+LIMIT_FREE = 5
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text("Привет! Я GPT‑4o бот. Задай вопрос!")
-
+    await update.message.reply_text("Привет! Я GPT‑4o бот. Задай свой вопрос!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-user_id = update.effective_user.id
-user_text = update.message.text
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
 
+    cursor.execute("SELECT usage_count FROM user_limits WHERE user_id = %s", (user_id,))
+    row = cursor.fetchone()
+    count = row[0] if row else 0
 
-cursor.execute("SELECT usage_count FROM user_limits WHERE user_id = %s", (user_id,))
-row = cursor.fetchone()
+    if count >= LIMIT_FREE:
+        await update.message.reply_text("Вы исчерпали бесплатный лимит. Для продолжения — оформите подписку.")
+        return
 
+    if row:
+        cursor.execute("UPDATE user_limits SET usage_count = usage_count + 1 WHERE user_id = %s", (user_id,))
+    else:
+        cursor.execute("INSERT INTO user_limits (user_id, usage_count) VALUES (%s, 1)", (user_id,))
+    conn.commit()
 
-if row:
-usage_count = row[0]
-if usage_count >= 5:
-await update.message.reply_text("Вы использовали бесплатный лимит. Чтобы продолжить, оформите подписку.")
-return
-cursor.execute("UPDATE user_limits SET usage_count = usage_count + 1 WHERE user_id = %s", (user_id,))
-else:
-cursor.execute("INSERT INTO user_limits (user_id, usage_count) VALUES (%s, 1)", (user_id,))
-conn.commit()
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": text}]
+        )
+        reply = response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Ошибка GPT‑4o: {e}")
+        reply = "Ошибка GPT‑4o. Попробуйте позже."
 
+    await update.message.reply_text(reply)
 
-try:
-response = client.chat.completions.create(
-model="gpt-4o",
-messages=[{"role": "user", "content": user_text}]
-)
-reply_text = response.choices[0].message.content
-except Exception as e:
-logger.error(f"Ошибка GPT‑4o: {e}")
-reply_text = "Ошибка GPT‑4o. Попробуй позже."
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    logger.info("Бот запущен. Ждёт сообщения.")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 8080)),
+        url_path=f"/webhook/{TELEGRAM_TOKEN}",
+        webhook_url=f"{os.getenv('WEBHOOK_URL')}/webhook/{TELEGRAM_TOKEN}",
+        drop_pending_updates=True
+    )
 
-await update.message.reply_text(reply_text)
-
-
-if __name__ == '__main__':
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-app.run_polling()
+if __name__ == "__main__":
+    main()
