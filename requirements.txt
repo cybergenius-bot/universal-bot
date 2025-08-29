@@ -1,6 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 python-telegram-bot[webhooks]==20.7
 psycopg2-binary
 openai
-uvicorn[standard]
