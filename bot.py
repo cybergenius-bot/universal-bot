@@ -1,12 +1,3 @@
-# bot.py
-# Production-ready Telegram бот на FastAPI (webhook) с:
-# - Lifespan (инициализация/завершение) и корректным жизненным циклом PTB Application
-# - Secure webhook: X-Telegram-Bot-Api-Secret-Token (автогенерация при отсутствии)
-# - Middleware correlation-id (graceful fallback), GZip, TrustedHost
-# - Асинхронная БД через SQLAlchemy 2.0 (graceful fallback на in-memory)
-# - Rate limit, health-check, базовые команды, обработка текста
-# - Поддержка переменных окружения: TELEGRAM_TOKEN или BOT_TOKEN, WEBHOOK_URL или BASE_URL
-
 import os
 import json
 import time
