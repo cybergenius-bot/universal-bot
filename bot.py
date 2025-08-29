@@ -1,10 +1,3 @@
-# bot.py
-# Production-ready Telegram бот на FastAPI (webhook) с:
-# - Lifespan (инициализация/завершение) и корректным жизненным циклом PTB Application
-# - Secure webhook: X-Telegram-Bot-Api-Secret-Token (автогенерация при отсутствии)
-# - Middleware correlation-id (graceful fallback), GZip, TrustedHost
-# - Асинхронная БД через SQLAlchemy 2.0 (graceful fallback на in-memory)
-# - Rate limit, health-check, базовые команды, обработка текста
 
 import os
 import json
@@ -38,10 +31,16 @@ except Exception:
             return True
 
 # --- Настройка окружения ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
+# WEBHOOK_URL приоритетен; если не задан, можно построить из BASE_URL
+WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").strip()
+if not WEBHOOK_URL:
+    base_url = (os.getenv("BASE_URL") or "").strip().rstrip("/")
+    if base_url:
+        WEBHOOK_URL = f"{base_url}/telegram"
+
 # Если не задан, секрет будет сгенерирован на старте и сохранён в CURRENT_WEBHOOK_SECRET
-TELEGRAM_WEBHOOK_SECRET_ENV = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()  # 1..256, A-Z a-z 0-9 _ -
+TELEGRAM_WEBHOOK_SECRET_ENV = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").strip()  # 1..256, A-Z a-z 0-9 _ -
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./bot.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -298,9 +297,8 @@ def verify_secret_token(req: Request) -> None:
     recv = req.headers.get(TELEGRAM_SECRET_HEADER)
     expected = CURRENT_WEBHOOK_SECRET
     if not expected:
-        # Если секрет не установлен (не должно случаться после старта), пропустим, но залогируем
-        logger.warning("Webhook secret not initialized at verification step")
-        return
+        # Во время старта может быть короткое окно без инициализации — вернём 503
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Webhook not initialized")
     if recv != expected:
         logger.warning("Invalid webhook secret token")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
@@ -318,4 +316,178 @@ def ip_in_ranges(ip: str, cidrs: List[str]) -> bool:
             continue
     return False
 
-def verify_ip_allow<span class="cursor">█</span>
+def verify_ip_allowlist(req: Request) -> None:
+    if not ENABLE_IP_ALLOWLIST:
+        return
+    ranges = [c for c in TELEGRAM_IP_RANGES.split(",") if c.strip()]
+    if not ranges:
+        return
+    client_ip = req.client.host if req.client else None
+    if not client_ip or not ip_in_ranges(client_ip, ranges):
+        logger.warning("Request IP not in allowlist: %s", client_ip)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+async def ensure_payload_size(req: Request):
+    cl = req.headers.get("content-length")
+    if cl is not None:
+        try:
+            if int(cl) > MAX_TELEGRAM_PAYLOAD_BYTES:
+                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Payload too large")
+        except ValueError:
+            pass
+    body = await req.body()
+    if len(body) > MAX_TELEGRAM_PAYLOAD_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Payload too large")
+    req._body = body  # Starlette private API
+
+# --- Lifespan: инициализация и завершение ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global application, bot, CURRENT_WEBHOOK_SECRET
+
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN (или BOT_TOKEN) is not set")
+    if not WEBHOOK_URL:
+        raise RuntimeError("WEBHOOK_URL (или BASE_URL) is not set")
+
+    # Инициализируем секрет (env или генерация)
+    if TELEGRAM_WEBHOOK_SECRET_ENV:
+        CURRENT_WEBHOOK_SECRET = TELEGRAM_WEBHOOK_SECRET_ENV
+    else:
+        CURRENT_WEBHOOK_SECRET = _generate_secret(48)  # генерим один раз на запуск
+
+    # 1) БД
+    if SQLA_AVAILABLE:
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        except Exception:
+            logger.exception("Failed to create DB schema")
+
+    # 2) PTB Application
+    application = build_ptb_application(TELEGRAM_TOKEN)
+    await application.initialize()  # обязательно до process_update
+    await application.start()
+    bot = application.bot
+
+    # 3) Команды и вебхук
+    try:
+        commands = [
+            BotCommand("start", "Начать работу"),
+            BotCommand("help", "Помощь"),
+            BotCommand("status", "Статус сервиса"),
+            BotCommand("stats", "Базовая статистика"),
+        ]
+        await bot.set_my_commands(commands)
+        allowed_updates = [x.strip() for x in TELEGRAM_ALLOWED_UPDATES.split(",") if x.strip()]
+        await bot.delete_webhook(drop_pending_updates=TELEGRAM_DROP_PENDING_UPDATES)
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            secret_token=CURRENT_WEBHOOK_SECRET,  # X-Telegram-Bot-Api-Secret-Token
+            allowed_updates=allowed_updates,
+            max_connections=TELEGRAM_MAX_CONNECTIONS,
+        )
+        logger.info("Webhook set to %s", WEBHOOK_URL)
+    except Exception as e:
+        logger.exception("Failed to set webhook: %s", e)
+        raise
+
+    try:
+        yield
+    finally:
+        try:
+            if bot:
+                await bot.delete_webhook(drop_pending_updates=False)
+                logger.info("✅ Webhook удалён при остановке")
+        except Exception:
+            logger.exception("Failed to delete webhook on shutdown")
+        try:
+            if application:
+                await application.stop()
+                await application.shutdown()
+        except Exception:
+            logger.exception("Failed to shutdown PTB application")
+        if SQLA_AVAILABLE:
+            try:
+                await engine.dispose()
+            except Exception:
+                logger.exception("Failed to dispose DB engine")
+
+# --- FastAPI app и middleware ---
+app = FastAPI(
+    title="Telegram Bot API",
+    version="1.0.0",
+    description="Production-ready Telegram bot on FastAPI (webhook).",
+    lifespan=lifespan,
+)
+
+app.add_middleware(CorrelationIdMiddleware, header_name=CORRELATION_ID_HEADER)
+app.add_middleware(GZipMiddleware, minimum_size=512)
+_allowed_hosts = [h.strip() for h in ALLOWED_HOSTS.split(",")] if ALLOWED_HOSTS else ["*"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+
+# --- Здоровье/сервис ---
+@app.get("/health/live")
+async def liveness():
+    return {"status": "alive"}
+
+@app.get("/health/ready")
+async def readiness():
+    ok_db = True
+    ok_bot = True
+    if SQLA_AVAILABLE:
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        except Exception:
+            ok_db = False
+    try:
+        me = await bot.get_me() if bot else None
+        ok_bot = me is not None
+    except Exception:
+        ok_bot = False
+    status_code = status.HTTP_200_OK if ok_db and ok_bot else status.HTTP_503_SERVICE_UNAVAILABLE
+    return Response(
+        content=json.dumps({"db": ok_db, "bot": ok_bot, "status": "ready" if ok_db and ok_bot else "not_ready"}),
+        media_type="application/json",
+        status_code=status_code,
+    )
+
+@app.get("/")
+async def root():
+    return {"message": "Telegram Bot is running", "webhook": WEBHOOK_URL}
+
+# --- Основной webhook эндпоинт ---
+@app.post("/telegram")
+async def telegram_webhook(request: Request):
+    verify_secret_token(request)  # проверка заголовка X-Telegram-Bot-Api-Secret-Token
+    verify_ip_allowlist(request)  # опционально
+    await ensure_payload_size(request)
+
+    ct = request.headers.get("content-type", "")
+    if "application/json" not in ct:
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="Unsupported content-type")
+
+    try:
+        body = request._body if hasattr(request, "_body") else await request.body()
+        data = json.loads(body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON")
+
+    try:
+        upd = Update.de_json(data, bot)
+        if upd is None:
+            logger.warning("Received invalid Update payload")
+            return Response(content='{"ok":false}', media_type="application/json", status_code=status.HTTP_200_OK)
+        # process_update допустим только после initialize/start
+        await application.process_update(upd)
+        return Response(content='{"ok":true}', media_type="application/json", status_code=status.HTTP_200_OK)
+    except Exception as e:
+        logger.exception("Error processing update: %s", e)
+        # 200, чтобы Telegram не ретраил лавинообразно
+        return Response(content='{"ok":true}', media_type="application/json", status_code=status.HTTP_200_OK)
+
+# --- Локальный запуск ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
