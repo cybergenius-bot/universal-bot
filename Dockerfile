@@ -1,24 +1,31 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-# Установка системных зависимостей
-RUN apt-get update && apt-get install -y \
-    gcc \
+# Системные пакеты: gcc для сборки; curl для healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Копирование файлов зависимостей
+WORKDIR /app
+
+# Устанавливаем зависимости
 COPY requirements.txt .
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Установка Python зависимостей
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Копирование кода приложения
+# Копируем исходники
 COPY . .
 
-# Создание непривилегированного пользователя
+# Нерутовый пользователь
 RUN useradd --create-home --shell /bin/bash app
 USER app
 
-# Запуск приложения
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD curl -fsS "http://127.0.0.1:${PORT:-8000}/health/live" || exit 1
+
+# Старт uvicorn; Railway прокинет PORT
+CMD ["sh", "-c", "python -m uvicorn bot:app --host 0.0.0.0 --port ${PORT:-8000}"]
