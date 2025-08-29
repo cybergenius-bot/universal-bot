@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from telegram import Update, Bot
-from telegram.ext import Application, Dispatcher, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, filters
 import os
 import asyncio
 
