@@ -6,9 +6,8 @@ import ipaddress
 import logging
 import secrets
 import string
-import tempfile
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from collections import defaultdict, deque
 
 from fastapi import FastAPI, Request, Response, HTTPException, status
@@ -30,7 +29,7 @@ except Exception:
                 record.correlation_id = "-"
             return True
 
-# --- Настройки окружения ---
+# --- Настройка окружения ---
 TELEGRAM_TOKEN = (os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN") or "").strip()
 WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").strip()
 if not WEBHOOK_URL:
@@ -39,6 +38,7 @@ if not WEBHOOK_URL:
         WEBHOOK_URL = f"{base_url}/telegram"
 
 TELEGRAM_WEBHOOK_SECRET_ENV = (os.getenv("TELEGRAM_WEBHOOK_SECRET") or "").strip()
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./bot.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*")
@@ -46,17 +46,16 @@ TELEGRAM_ALLOWED_UPDATES = os.getenv("TELEGRAM_ALLOWED_UPDATES", "message,callba
 TELEGRAM_DROP_PENDING_UPDATES = os.getenv("TELEGRAM_DROP_PENDING_UPDATES", "true").lower() == "true"
 TELEGRAM_MAX_CONNECTIONS = int(os.getenv("TELEGRAM_MAX_CONNECTIONS", "40"))
 ENABLE_IP_ALLOWLIST = os.getenv("ENABLE_IP_ALLOWLIST", "false").lower() == "true"
-TELEGRAM_IP_RANGES = os.getenv("TELEGRAM_IP_RANGES", "")  # например: "149.154.160.0/20,91.108.4.0/22"
+TELEGRAM_IP_RANGES = os.getenv("TELEGRAM_IP_RANGES", "")
 CORRELATION_ID_HEADER = os.getenv("CORRELATION_ID_HEADER", "X-Request-ID")
 MAX_TELEGRAM_PAYLOAD_BYTES = int(os.getenv("MAX_TELEGRAM_PAYLOAD_BYTES", "1048576"))
 
-# OpenAI настройки
+# OpenAI (GPT‑4o)
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()  # основной диалог
-OPENAI_TEMP = float(os.getenv("OPENAI_TEMPERATURE", "0.5"))
-OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "700"))
-OPENAI_ENABLE_VOICE = os.getenv("OPENAI_ENABLE_VOICE", "true").lower() == "true"  # распознавать voice
-AI_SYSTEM_PROMPT = os.getenv("AI_SYSTEM_PROMPT", "You are a helpful, concise, and safe assistant. Reply in the user's language.")
+OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4o").strip()  # по запросу — gpt-4o; можно сменить на gpt-4o-mini
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.4"))
+OPENAI_MAX_HISTORY = int(os.getenv("OPENAI_MAX_HISTORY", "8"))  # пар сообщений в памяти
+DISABLE_RATE_LIMIT = os.getenv("DISABLE_RATE_LIMIT", "false").lower() == "true"
 
 # --- Логирование + фильтр для correlation_id ---
 logging.basicConfig(
@@ -78,31 +77,19 @@ from telegram.ext import (
     filters,
 )
 
-application: Optional[Application] = None  # PTB Application
-bot: Optional[Bot] = None  # Telegram Bot
+application: Optional[Application] = None
+bot: Optional[Bot] = None
 
 # Текущий секрет вебхука (из env или сгенерированный на старте)
 CURRENT_WEBHOOK_SECRET: Optional[str] = None
 
 def _generate_secret(length: int = 48) -> str:
-    # Разрешённые символы по требованиям Telegram (A-Z a-z 0-9 _ -)
     alphabet = string.ascii_letters + string.digits + "_-"
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
-# --- OpenAI клиент (async) ---
-openai_client = None
-OPENAI_ENABLED = bool(OPENAI_API_KEY)
-
-if OPENAI_ENABLED:
-    try:
-        from openai import AsyncOpenAI
-    except Exception:
-        OPENAI_ENABLED = False
-        logger.warning("OpenAI client not installed; AI disabled")
-
-# --- SQLAlchemy (опционально), fallback на in-memory если модуля нет ---
+# --- SQLAlchemy (опционально), fallback на in-memory ---
 try:
-    from sqlalchemy import String, Integer, BigInteger, Text, DateTime, func, select, text as sql_text
+    from sqlalchemy import String, Integer, BigInteger, Text, DateTime, func, select, text as sa_text
     from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
@@ -128,7 +115,6 @@ try:
         chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
         message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
         text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-        role: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # 'user'/'assistant' для диалога
         created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
@@ -151,29 +137,23 @@ try:
             user.last_name = tg_user.last_name
         await session.commit()
 
-    async def log_message(session: AsyncSession, tg_user_id: int, chat_id: int, msg_id: Optional[int], text_val: Optional[str], role: Optional[str] = None) -> None:
-        entry = MessageLog(tg_user_id=tg_user_id, chat_id=chat_id, message_id=msg_id, text=text_val, role=role)
+    async def log_message(session: AsyncSession, tg_user_id: int, chat_id: int, msg_id: Optional[int], text_val: Optional[str]) -> None:
+        entry = MessageLog(tg_user_id=tg_user_id, chat_id=chat_id, message_id=msg_id, text=text_val)
         session.add(entry)
         await session.commit()
 
-    async def get_recent_dialog(session: AsyncSession, tg_user_id: int, limit: int = 12) -> List[Dict[str, str]]:
-        # Получаем последние N реплик с ролью
-        res = await session.execute(
-            select(MessageLog).where(MessageLog.tg_user_id == tg_user_id, MessageLog.role.is_not(None)).order_by(MessageLog.id.desc()).limit(limit)
-        )
-        rows = list(res.scalars())
-        dialog = []
-        for r in reversed(rows):
-            if r.role in ("user", "assistant") and r.text:
-                dialog.append({"role": r.role, "content": r.text})
-        return dialog
+    async def count_users(session: AsyncSession) -> int:
+        res = await session.execute(select(func.count()).select_from(User))
+        return int(res.scalar_one() or 0)
+
+    async def count_messages(session: AsyncSession) -> int:
+        res = await session.execute(select(func.count()).select_from(MessageLog))
+        return int(res.scalar_one() or 0)
 
 except Exception:
-    # Fallback: in-memory
     SQLA_AVAILABLE = False
     _users: Dict[int, Dict[str, Any]] = {}
     _messages: List[Dict[str, Any]] = []
-    _dialog_memory: Dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
     _lock = asyncio.Lock()
 
     async def upsert_user(session, tg_user) -> None:
@@ -185,7 +165,7 @@ except Exception:
                 "last_name": tg_user.last_name,
             }
 
-    async def log_message(session, tg_user_id: int, chat_id: int, msg_id: Optional[int], text_val: Optional[str], role: Optional[str] = None) -> None:
+    async def log_message(session, tg_user_id: int, chat_id: int, msg_id: Optional[int], text_val: Optional[str]) -> None:
         async with _lock:
             _messages.append(
                 {
@@ -193,114 +173,114 @@ except Exception:
                     "chat_id": chat_id,
                     "message_id": msg_id,
                     "text": text_val,
-                    "role": role,
                     "created_at": time.time(),
                 }
             )
-            if role in ("user", "assistant") and text_val:
-                dq = _dialog_memory[tg_user_id]
-                dq.append({"role": role, "content": text_val})
 
-    async def get_recent_dialog(session, tg_user_id: int, limit: int = 12) -> List[Dict[str, str]]:
-        async with _lock:
-            dq = _dialog_memory[tg_user_id]
-            # вернём последние limit
-            return list(dq)[-limit:]
+    async def count_users(session=None) -> int:
+        return len(_users)
 
-# --- Простая антиспам/Rate Limit логика (in-memory) ---
+    async def count_messages(session=None) -> int:
+        return len(_messages)
+
+# --- OpenAI клиент ---
+_openai_client = None
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        from openai import OpenAI  # lazy import
+        _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    return _openai_client
+
+# --- Вспомогательные функции ---
+TELEGRAM_MAX_MESSAGE_CHARS = 4096
+def split_chunks(s: str, size: int = 4000) -> List[str]:
+    # режем по границам строк, сохраняя читаемость
+    out, cur = [], []
+    cur_len = 0
+    for line in s.splitlines(keepends=True):
+        if cur_len + len(line) > size and cur:
+            out.append("".join(cur))
+            cur, cur_len = [line], len(line)
+        else:
+            cur.append(line)
+            cur_len += len(line)
+    if cur:
+        out.append("".join(cur))
+    # если нет переносов, всё равно гарантируем размер
+    final = []
+    for chunk in out:
+        if len(chunk) <= size:
+            final.append(chunk)
+        else:
+            for i in range(0, len(chunk), size):
+                final.append(chunk[i:i+size])
+    return final or [""]
+
+def build_system_prompt() -> str:
+    return (
+        "Ты — универсальный, вежливый и полезный ассистент. "
+        "Отвечай кратко и по делу, при необходимости давай пошаговые инструкции. "
+        "Если вопрос неясен — уточни. Поддерживай русский язык."
+    )
+
+def build_vision_content(text_part: Optional[str], image_url: Optional[str]) -> List[Dict[str, Any]]:
+    content: List[Dict[str, Any]] = []
+    if text_part:
+        content.append({"type": "text", "text": text_part})
+    if image_url:
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    if not content:
+        content.append({"type": "text", "text": "Опиши изображение."})
+    return content
+
+async def openai_chat_reply(
+    user_text: Optional[str],
+    vision_image_url: Optional[str],
+    history: List[Dict[str, Union[str, List[Dict[str, Any]]]]],
+) -> str:
+    """
+    history: список сообщений вида:
+      {"role":"user","content":"..."} или {"role":"assistant","content":"..."} или для vision content=[{...}]
+    """
+    client = _get_openai_client()
+    sys_prompt = build_system_prompt()
+
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": sys_prompt}]
+    # берем только последние OPENAI_MAX_HISTORY пар (user+assistant)
+    trimmed = history[-(OPENAI_MAX_HISTORY * 2):] if OPENAI_MAX_HISTORY > 0 else history
+    messages.extend(trimmed)
+
+    if vision_image_url:
+        messages.append({"role": "user", "content": build_vision_content(user_text or "", vision_image_url)})
+    else:
+        messages.append({"role": "user", "content": user_text or ""})
+
+    # Вызов Chat Completions (без стриминга — надёжно для Telegram)
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=messages,
+        temperature=OPENAI_TEMPERATURE,
+    )
+    answer = (resp.choices[0].message.content or "").strip()
+    return answer or "Готово."
+
+# --- Rate limit (можно отключить переменной DISABLE_RATE_LIMIT=true) ---
 RATE_LIMIT_WINDOW_SEC = 3
 RATE_LIMIT_MAX_MESSAGES = 8
 _user_messages_window: Dict[int, deque] = defaultdict(lambda: deque(maxlen=RATE_LIMIT_MAX_MESSAGES))
 
-# --- Помощники AI ---
-async def ai_chat_text(user_id: int, user_text: str) -> str:
-    """Текстовый диалог с GPT-4o."""
-    if not OPENAI_ENABLED or not openai_client:
-        return "AI временно недоступен. Повторите позже."
-
-    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
-    # Добавим историю
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            history = await get_recent_dialog(session, user_id, limit=12)
-    else:
-        history = await get_recent_dialog(None, user_id, limit=12)
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        resp = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            temperature=OPENAI_TEMP,
-            max_tokens=OPENAI_MAX_TOKENS,
-        )
-        reply = resp.choices[0].message.content or "..."
-        return reply.strip()
-    except Exception as e:
-        logger.exception("OpenAI chat error: %s", e)
-        return "Извините, сейчас я не могу ответить. Попробуйте позже."
-
-async def ai_chat_vision(user_id: int, user_text: Optional[str], image_urls: List[str]) -> str:
-    """Мультимодальный вход (текст+картинка) для GPT-4o."""
-    if not OPENAI_ENABLED or not openai_client:
-        return "AI временно недоступен. Повторите позже."
-
-    # content как список блоков
-    user_content: List[Dict[str, Any]] = []
-    if user_text:
-        user_content.append({"type": "text", "text": user_text})
-    for url in image_urls:
-        user_content.append({"type": "image_url", "image_url": {"url": url}})
-
-    messages = [{"role": "system", "content": AI_SYSTEM_PROMPT}]
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            history = await get_recent_dialog(session, user_id, limit=8)
-    else:
-        history = await get_recent_dialog(None, user_id, limit=8)
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_content})
-
-    try:
-        resp = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            temperature=OPENAI_TEMP,
-            max_tokens=OPENAI_MAX_TOKENS,
-        )
-        reply = resp.choices[0].message.content or "..."
-        return reply.strip()
-    except Exception as e:
-        logger.exception("OpenAI vision error: %s", e)
-        return "Извините, сейчас я не могу обработать изображение. Попробуйте позже."
-
-async def transcribe_voice(file_bytes: bytes, filename: str = "voice.ogg") -> Optional[str]:
-    """Распознавание голоса (Whisper). Возвращает текст или None."""
-    if not OPENAI_ENABLED or not openai_client or not OPENAI_ENABLE_VOICE:
-        return None
-    try:
-        # Сохраняем во временный файл для передачи в OpenAI
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp:
-            tmp.write(file_bytes)
-            tmp_path = tmp.name
-        try:
-            # В openai v1.x:
-            with open(tmp_path, "rb") as f:
-                resp = await openai_client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f,
-                )
-            text = getattr(resp, "text", None)
-            return text
-        finally:
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.exception("OpenAI transcription error: %s", e)
-        return None
+def rate_limited(user_id: int) -> bool:
+    if DISABLE_RATE_LIMIT:
+        return False
+    now = time.time()
+    window = _user_messages_window[user_id]
+    window.append(now)
+    while window and now - window[0] > RATE_LIMIT_WINDOW_SEC:
+        window.popleft()
+    return len(window) >= RATE_LIMIT_MAX_MESSAGES
 
 # --- Handlers ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,188 +289,126 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if SQLA_AVAILABLE:
         async with SessionLocal() as session:
             await upsert_user(session, update.effective_user)
-            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/start", role="user")
+            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/start")
     else:
         await upsert_user(None, update.effective_user)
-        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/start", role="user")
+        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/start")
 
-    reply = (
+    await update.message.reply_text(
         f"Привет, {update.effective_user.first_name or 'друг'}! 👋\n"
-        f"Я — универсальный GPT‑4o бот. Понимаю текст, фото (с описанием) и голосовые сообщения.\n"
-        f"Отправь мне сообщение или /help для справки."
+        f"Я подключён к GPT‑4o. Просто напиши сообщение или пришли фото с подписью."
     )
-    await update.message.reply_text(reply)
-    # Лог ответа
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            await log_message(session, update.effective_user.id, update.effective_chat.id, None, reply, role="assistant")
-    else:
-        await log_message(None, update.effective_user.id, update.effective_chat.id, None, reply, role="assistant")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-    txt = (
-        "Я могу:\n"
-        "• Отвечать на ваши вопросы (GPT‑4o)\n"
-        "• Понимать фото (пришлите изображение с подписью)\n"
-        "• Распознавать голос (пришлите voice)\n\n"
-        "Команды:\n"
-        "/start — начать\n"
-        "/help — помощь\n"
-        "/status — статус\n"
-        "/stats — статистика\n"
-    )
-    await update.message.reply_text(txt)
+    log_text = "/help"
     if SQLA_AVAILABLE:
         async with SessionLocal() as session:
-            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/help", role="user")
-            await log_message(session, update.effective_user.id, update.effective_chat.id, None, txt, role="assistant")
+            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, log_text)
     else:
-        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/help", role="user")
-        await log_message(None, update.effective_user.id, update.effective_chat.id, None, txt, role="assistant")
+        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, log_text)
+
+    await update.message.reply_text(
+        "Я могу:\n"
+        "• Отвечать на текстовые вопросы (GPT‑4o)\n"
+        "• Понимать изображения (пришлите фото с подписью)\n"
+        "• Команды: /start /help /status /stats\n"
+    )
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-    msg = f"✅ Бот работает. AI: {'включен' if OPENAI_ENABLED else 'выключен'}."
-    await update.message.reply_text(msg)
     if SQLA_AVAILABLE:
         async with SessionLocal() as session:
-            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/status", role="user")
-            await log_message(session, update.effective_user.id, update.effective_chat.id, None, msg, role="assistant")
+            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/status")
     else:
-        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/status", role="user")
-        await log_message(None, update.effective_user.id, update.effective_chat.id, None, msg, role="assistant")
+        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/status")
+
+    await update.message.reply_text("✅ Сервис в сети. GPT‑4o подключён." if OPENAI_API_KEY else "⚠️ GPT не настроен (нет OPENAI_API_KEY).")
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     if SQLA_AVAILABLE:
-        from sqlalchemy import func as sa_func
         async with SessionLocal() as session:
-            users_cnt = (await session.execute(select(sa_func.count()).select_from(User))).scalar_one()
-            msgs_cnt = (await session.execute(select(sa_func.count()).select_from(MessageLog))).scalar_one()
-            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/stats", role="user")
-        txt = f"Статистика: пользователей {users_cnt}, сообщений {msgs_cnt}"
-        await update.message.reply_text(txt)
-        async with SessionLocal() as session:
-            await log_message(session, update.effective_user.id, update.effective_chat.id, None, txt, role="assistant")
+            users_cnt = await count_users(session)
+            msgs_cnt = await count_messages(session)
+            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/stats")
+        await update.message.reply_text(f"Статистика: пользователей {users_cnt}, сообщений {msgs_cnt}")
     else:
-        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/stats", role="user")
-        txt = "Статистика (in-memory). Для постоянной истории подключите БД."
-        await update.message.reply_text(txt)
-        await log_message(None, update.effective_user.id, update.effective_chat.id, None, txt, role="assistant")
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-    uid = update.effective_user.id
-    now = time.time()
-    window = _user_messages_window[uid]
-    window.append(now)
-    while window and now - window[0] > RATE_LIMIT_WINDOW_SEC:
-        window.popleft()
-    if len(window) >= RATE_LIMIT_MAX_MESSAGES:
-        return
-
-    user_text = update.message.text.strip()
-    # Лог входа
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            await upsert_user(session, update.effective_user)
-            await log_message(session, uid, update.effective_chat.id, update.message.message_id, user_text, role="user")
-    else:
-        await upsert_user(None, update.effective_user)
-        await log_message(None, uid, update.effective_chat.id, update.message.message_id, user_text, role="user")
-
-    # GPT-4o ответ
-    reply = await ai_chat_text(uid, user_text)
-    await update.message.reply_text(reply)
-
-    # Лог ответа
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            await log_message(session, uid, update.effective_chat.id, None, reply, role="assistant")
-    else:
-        await log_message(None, uid, update.effective_chat.id, None, reply, role="assistant")
+        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, "/stats")
+        await update.message.reply_text("Статистика (in-memory).")
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Обработка изображений + подписи через GPT‑4o vision
     if not update.message or not update.message.photo:
         return
-    uid = update.effective_user.id
-    photos = update.message.photo
-    caption = (update.message.caption or "").strip()
-    # Берём самое большое фото
-    largest = photos[-1]
-    file = await context.bot.get_file(largest.file_id)
-    # Строим публичный URL файла
+    if rate_limited(update.effective_user.id):
+        return
+
+    caption = update.message.caption or ""
+    # берём самое большое фото
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    # прямой URL к файлу Telegram (валиден без подписи)
     image_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file.file_path}"
 
-    # Лог входа
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            await upsert_user(session, update.effective_user)
-            await log_message(session, uid, update.effective_chat.id, update.message.message_id, f"[photo] {caption}", role="user")
-    else:
-        await upsert_user(None, update.effective_user)
-        await log_message(None, uid, update.effective_chat.id, update.message.message_id, f"[photo] {caption}", role="user")
+    # история диалога пользователя (in-memory)
+    history: List[Dict[str, Any]] = context.user_data.get("history", [])
 
-    reply = await ai_chat_vision(uid, caption if caption else "Опиши картинку.", [image_url])
-    await update.message.reply_text(reply)
-
-    # Лог ответа
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            await log_message(session, uid, update.effective_chat.id, None, reply, role="assistant")
-    else:
-        await log_message(None, uid, update.effective_chat.id, None, reply, role="assistant")
-
-async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not OPENAI_ENABLE_VOICE:
-        return
-    if not update.message or not update.message.voice:
-        return
-    uid = update.effective_user.id
-    voice = update.message.voice
-    tgf = await context.bot.get_file(voice.file_id)
-    # Скачиваем байты голоса
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{tgf.file_path}"
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.get(file_url)
-            resp.raise_for_status()
-            voice_bytes = resp.content
+        reply = await openai_chat_reply(user_text=caption, vision_image_url=image_url, history=history)
     except Exception as e:
-        logger.exception("Download voice error: %s", e)
-        await update.message.reply_text("Не удалось скачать голосовое сообщение.")
+        logger.exception("OpenAI vision error: %s", e)
+        reply = "Извините, не удалось обработать изображение."
+
+    # обновляем историю
+    if OPENAI_MAX_HISTORY > 0:
+        # добавляем как текстовую запись (не храним сами картинки в истории — только текст подписи)
+        history.append({"role": "user", "content": caption})
+        history.append({"role": "assistant", "content": reply})
+        context.user_data["history"] = history[-(OPENAI_MAX_HISTORY * 2):]
+
+    # отправляем с нарезкой
+    for chunk in split_chunks(reply, 4000):
+        await update.message.reply_text(chunk)
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or (not update.message.text and not update.message.caption):
+        return
+    if rate_limited(update.effective_user.id):
         return
 
-    # Лог входа
+    text_val = update.message.text or update.message.caption or ""
     if SQLA_AVAILABLE:
         async with SessionLocal() as session:
             await upsert_user(session, update.effective_user)
-            await log_message(session, uid, update.effective_chat.id, update.message.message_id, "[voice]", role="user")
+            await log_message(session, update.effective_user.id, update.effective_chat.id, update.message.message_id, text_val)
     else:
         await upsert_user(None, update.effective_user)
-        await log_message(None, uid, update.effective_chat.id, update.message.message_id, "[voice]", role="user")
+        await log_message(None, update.effective_user.id, update.effective_chat.id, update.message.message_id, text_val)
 
-    transcript = await transcribe_voice(voice_bytes, filename="voice.ogg")
-    if not transcript:
-        await update.message.reply_text("Не удалось распознать голос. Попробуйте ещё раз.")
+    # Если есть фото в этом же сообщении — пусть сработает photo_handler (в Telegram caption идёт вместе с фото),
+    # здесь обрабатываем «чистый» текст.
+    if update.message.photo:
         return
 
-    # Диалог с GPT по расшифровке
-    reply = await ai_chat_text(uid, transcript)
-    await update.message.reply_text(reply)
+    # История
+    history: List[Dict[str, Any]] = context.user_data.get("history", [])
+    try:
+        reply = await openai_chat_reply(user_text=text_val, vision_image_url=None, history=history)
+    except Exception as e:
+        logger.exception("OpenAI chat error: %s", e)
+        reply = "Извините, сейчас не могу ответить. Попробуйте позже."
 
-    # Лог ответа
-    if SQLA_AVAILABLE:
-        async with SessionLocal() as session:
-            await log_message(session, uid, update.effective_chat.id, None, reply, role="assistant")
-    else:
-        await log_message(None, uid, update.effective_chat.id, None, reply, role="assistant")
+    if OPENAI_MAX_HISTORY > 0:
+        history.append({"role": "user", "content": text_val})
+        history.append({"role": "assistant", "content": reply})
+        context.user_data["history"] = history[-(OPENAI_MAX_HISTORY * 2):]
+
+    for chunk in split_chunks(reply, 4000):
+        await update.message.reply_text(chunk)
 
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("PTB error: %s", repr(context.error), exc_info=True)
@@ -506,8 +424,9 @@ def build_ptb_application(token: str) -> Application:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
-    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, photo_handler))
+    # фото с подписью — отдельный хэндлер до текстового
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    # обычный текст
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(error_handler)
     return app
@@ -564,27 +483,17 @@ async def ensure_payload_size(req: Request):
 # --- Lifespan: инициализация и завершение ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global application, bot, CURRENT_WEBHOOK_SECRET, openai_client
+    global application, bot, CURRENT_WEBHOOK_SECRET
 
     if not TELEGRAM_TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN (или BOT_TOKEN) is not set")
     if not WEBHOOK_URL:
         raise RuntimeError("WEBHOOK_URL (или BASE_URL) is not set")
 
-    # Инициализируем секрет (env или генерация)
     if TELEGRAM_WEBHOOK_SECRET_ENV:
         CURRENT_WEBHOOK_SECRET = TELEGRAM_WEBHOOK_SECRET_ENV
     else:
-        CURRENT_WEBHOOK_SECRET = _generate_secret(48)
-
-    # OpenAI клиент
-    if OPENAI_ENABLED:
-        try:
-            openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
-            logger.info("OpenAI client initialized with model %s", OPENAI_MODEL)
-        except Exception:
-            openai_client = None
-            logger.exception("Failed to initialize OpenAI client")
+        CURRENT_WEBHOOK_SECRET = _generate_secret()
 
     # 1) БД
     if SQLA_AVAILABLE:
@@ -645,9 +554,9 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI app и middleware ---
 app = FastAPI(
-    title="Telegram Bot API (GPT-4o)",
+    title="Telegram Bot API (GPT‑4o)",
     version="1.1.0",
-    description="Telegram GPT‑4o bot on FastAPI (webhook).",
+    description="Telegram bot on FastAPI + GPT‑4o (webhook).",
     lifespan=lifespan,
 )
 
@@ -656,7 +565,7 @@ app.add_middleware(GZipMiddleware, minimum_size=512)
 _allowed_hosts = [h.strip() for h in ALLOWED_HOSTS.split(",")] if ALLOWED_HOSTS else ["*"]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
 
-# --- Health / root ---
+# --- Health/Service ---
 @app.get("/health/live")
 async def liveness():
     return {"status": "alive"}
@@ -668,7 +577,7 @@ async def readiness():
     if SQLA_AVAILABLE:
         try:
             async with engine.connect() as conn:
-                await conn.execute(sql_text("SELECT 1"))
+                await conn.execute(sa_text("SELECT 1"))
         except Exception:
             ok_db = False
     try:
@@ -685,7 +594,7 @@ async def readiness():
 
 @app.get("/")
 async def root():
-    return {"message": "Telegram GPT‑4o Bot is running", "webhook": WEBHOOK_URL, "ai": "enabled" if OPENAI_ENABLED else "disabled"}
+    return {"message": "Telegram Bot is running (GPT‑4o ready)", "webhook": WEBHOOK_URL}
 
 # --- Основной webhook ---
 @app.post("/telegram")
