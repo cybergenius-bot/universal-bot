@@ -5,3 +5,6 @@ python-multipart==0.0.6
 asgi-correlation-id>=4.3,<5.0
 SQLAlchemy>=2.0,<2.1
 asyncpg>=0.29,<0.30
+paypalcheckoutsdk>=1.0.2,<2.0
+paypalhttp>=1.0.1,<2.0
+openai>=1.40.0,<2.0
