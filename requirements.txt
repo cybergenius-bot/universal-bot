@@ -2,3 +2,6 @@ fastapi==0.104.1
 python-telegram-bot[webhooks]==20.7
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
+asgi-correlation-id>=4.3,<5.0
+SQLAlchemy>=2.0,<2.1
+asyncpg>=0.29,<0.30
