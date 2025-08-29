@@ -1,24 +1,45 @@
-# database.py
-import os
-import psycopg2
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from contextlib import asynccontextmanager
+from .config import settings
 
-# Получаем URL из переменных окружения
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise ValueError("Переменная окружения DATABASE_URL не задана")
+# Создание движка базы данных
+engine = create_async_engine(
+    settings.database_url.replace('postgresql://', 'postgresql+asyncpg://'),
+    echo=settings.debug,
+    future=True
+)
 
-# Подключаемся к внешней базе по URL
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
+# Создание фабрики сессий
+async_session = sessionmaker(
+    engine, class_=AsyncSession, expire_on_commit=False
+)
 
-def ensure_table():
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS user_limits (
-        user_id BIGINT PRIMARY KEY,
-        usage_count INTEGER DEFAULT 0
-    )
-    """)
-    conn.commit()
+# Базовый класс для моделей
+Base = declarative_base()
 
-# При импорте сразу гарантируем создание таблицы
-ensure_table()
+
+@asynccontextmanager
+async def get_db():
+    """Контекстный менеджер для работы с БД"""
+    async with async_session() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+async def init_db():
+    """Инициализация базы данных"""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+async def close_db():
+    """Закрытие соединения с БД"""
+    await engine.dispose()
