@@ -1,51 +1,42 @@
-"""Application configuration using Pydantic settings."""
-
-from __future__ import annotations
-
 import os
-from pydantic import BaseSettings
-
-try:  # Pydantic v2
-    from pydantic_settings import BaseSettings
-except Exception:  # pragma: no cover - fallback for Pydantic v1
-    from pydantic import BaseSettings
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
-OPENAI_MODEL = "gpt-4o"
-FREE_MESSAGES = 20
-"""Application configuration using Pydantic settings."""
-
-from __future__ import annotations
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
-PAYPAL_SECRET = os.getenv("PAYPAL_SECRET")
-PAYPAL_MODE = os.getenv("PAYPAL_MODE", "sandbox")
-BASE_URL = os.getenv("BASE_URL")
-
-try:  # Pydantic v2
-    from pydantic_settings import BaseSettings
-except Exception:  # pragma: no cover - fallback for Pydantic v1
-    from pydantic import BaseSettings
+from typing import List
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    """Runtime configuration loaded from environment variables."""
+    """Настройки приложения"""
+    
+    # Telegram настройки
+    telegram_token: str
+    webhook_url: str
+    admin_user_ids: str = ""
+    
+    # База данных
+    database_url: str = "sqlite:///./telegram_bot.db"
+    
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+    
+    # Приложение
+    debug: bool = False
+    secret_key: str
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    
+    # Логирование
+    log_level: str = "INFO"
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+    
+    @property
+    def admin_ids(self) -> List[int]:
+        """Получить список ID администраторов"""
+        if not self.admin_user_ids:
+            return []
+        return [int(uid.strip()) for uid in self.admin_user_ids.split(',') if uid.strip()]
 
-    TELEGRAM_TOKEN: str | None = None
-    WEBHOOK_URL: str | None = None
-    OPENAI_API_KEY: str | None = None
-    DATABASE_URL: str | None = None
 
-    OPENAI_MODEL: str = "gpt-4o"
-    FREE_MESSAGES: int = 20
-    DATABASE_URL: str | None = None
-
-    PAYPAL_CLIENT_ID: str | None = None
-    PAYPAL_SECRET: str | None = None
-    PAYPAL_MODE: str = "sandbox"
-    BASE_URL: str | None = None
-
-
+# Глобальный объект настроек
 settings = Settings()
