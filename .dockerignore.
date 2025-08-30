@@ -2,12 +2,16 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.sqlite3
 *.log
 .env
+.env.*
 .git
 .gitignore
 .vscode
 .idea
-.cache
 dist
 build
+venv
+.venv
+node_modules
