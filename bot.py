@@ -1,5 +1,4 @@
 import os
-import sys
 import io
 import asyncio
 import logging
@@ -11,19 +10,11 @@ from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 ---------- Логирование ----------
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-level=LOG_LEVEL,
-format="%(asctime)s %(levelname)s %(name)s %(message)s",
-handlers=[logging.StreamHandler(sys.stdout)],
+level=logging.INFO,
+format="%(asctime)s %(levelname)s %(name)s %(message)s"
 )
 logger = logging.getLogger("bot")
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("telegram.vendor.ptb_urllib3").setLevel(logging.WARNING)
-logging.getLogger("apscheduler").setLevel(logging.WARNING)
-logging.getLogger("uvicorn.error").setLevel(logging.INFO)
-logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 ---------- Переменные окружения ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
@@ -78,14 +69,14 @@ def whisper_sync(data: bytes, name: str, lang: Optional[str] = "ru") -> str:
 """
 if not openai_client:
     raise RuntimeError("OPENAI_API_KEY не задан или OpenAI клиент не инициализирован.")
-resp = openai_client.audio.transcriptions.create(
+text = openai_client.audio.transcriptions.create(
     model="whisper-1",
     file=NamedBytesIO(data, name),
     response_format="text",
     language=lang or "ru",
     temperature=0,
 )
-return resp  # SDK возвращает str при response_format="text"
+return text  # SDK вернёт str при response_format="text"
 ---------- Команды ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text(
