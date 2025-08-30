@@ -9,4 +9,4 @@ RUN sed -i 's/\r$//' /app/entrypoint.sh && cp /app/entrypoint.sh /usr/local/bin/
 RUN python -c 'import compileall,sys; sys.exit(0 if compileall.compile_dir("/app", force=True, quiet=1) else 1)'
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD sh -lc 'curl -fsS "http://localhost😒{PORT:-8080}/health/live" || exit 1'
-ENTRYPOINT
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
