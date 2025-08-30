@@ -5,7 +5,6 @@ import logging
 import subprocess
 import base64
 from typing import Optional, List
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from telegram import Update
@@ -30,8 +29,9 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 except Exception as e:
 logger.warning("OpenAI SDK init warn: %s", e)
 openai_client = None
-Глобально: PTB Application
+Глобально: PTB Application и флаг готовности
 application: Optional[Application] = None
+bot_ready: bool = False
 Утилиты
 class NamedBytesIO(io.BytesIO):
 def __init__(self, data: bytes, name: str):
@@ -65,7 +65,6 @@ p = subprocess.run(
 )
 return p.stdout
 def extract_keyframes_sync(src: bytes, frames: int = 3, scale_width: int = 640) -> List[bytes]:
-# Извлекает до N кадров из видео и возвращает список JPEG-байт
 p = subprocess.run(
     ["ffmpeg", "-loglevel", "error", "-y", "-i", "pipe:0",
      "-vf", f"fps=1,scale={scale_width}:-1", "-vframes", str(frames),
@@ -74,18 +73,13 @@ p = subprocess.run(
 )
 data = p.stdout
 imgs: List[bytes] = []
-SOI = b"\xff\xd8"
-EOI = b"\xff\xd9"
-i = 0
+SOI = b"\xff\xd8"; EOI = b"\xff\xd9"; i = 0
 while True:
     s = data.find(SOI, i)
-    if s == -1:
-        break
+    if s == -1: break
     e = data.find(EOI, s)
-    if e == -1:
-        break
-    imgs.append(data[s:e+2])
-    i = e + 2
+    if e == -1: break
+    imgs.append(data[s:e+2]); i = e + 2
 return imgs[:frames]
 def whisper_sync(data: bytes, name: str, lang: Optional[str] = "ru") -> str:
 if not openai_client:
@@ -288,7 +282,6 @@ if not update.message or not update.message.video:
     return
 try:
     vid = await tg_download_bytes(context.bot, update.message.video.file_id)
-    # Аудио → транскрипция → summary
     wav = await asyncio.to_thread(ffmpeg_to_wav_sync, vid)
     transcript = await asyncio.to_thread(whisper_sync, wav, "video.wav", "ru")
     transcript = (transcript or "").strip()
@@ -301,7 +294,6 @@ try:
             max_tokens=900,
             temperature=0.6,
         )
-    # Ключевые кадры → vision
     frames = await asyncio.to_thread(extract_keyframes_sync, vid, 3, 640)
     vision_parts: List[str] = []
     for i, img in enumerate(frames, 1):
@@ -346,16 +338,13 @@ if not TELEGRAM_BOT_TOKEN:
 app_ptb = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
 register_handlers(app_ptb)
 return app_ptb
-FastAPI lifespan (безопасный: не падаем без токена)
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-global application
+Фоновая инициализация бота (не блокирует старт сервера)
+async def _init_bot_background():
+global application, bot_ready
+bot_ready = False
 try:
-    logger.info("Starting FastAPI lifespan init...")
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN не задан — пропускаю инициализацию бота. Сервис поднимется, но /health/ready будет 503.")
-        application = None
-        yield
+        logger.error("TELEGRAM_BOT_TOKEN не задан — бот не будет инициализирован (HTTP сервис работает).")
         return
     application = create_ptb_application()
     await application.initialize()
@@ -378,69 +367,72 @@ try:
         logger.info("Webhook установлен: %s", WEBHOOK_URL)
     else:
         logger.warning("PUBLIC_BASE_URL/TELEGRAM_WEBHOOK_SECRET не заданы — вебхук не установлен.")
-    yield
+    bot_ready = True
+    logger.info("Bot init: готов к работе.")
 except Exception as e:
-    logger.error("Startup error: %s", e, exc_info=True)
-    raise
-finally:
-    try:
-        if application:
-            try:
-                await application.bot.delete_webhook(drop_pending_updates=False)
-            except Exception as e:
-                logger.warning("delete_webhook at shutdown warn: %s", e)
-            await application.stop()
-            await application.shutdown()
-    except Exception as e:
-        logger.error("Shutdown error: %s", e, exc_info=True)
-Приложение FastAPI
-app = FastAPI(title="Telegram Bot", version="1.3.0", lifespan=lifespan)
+    logger.error("Bot init error: %s", e, exc_info=True)
+    bot_ready = False
+Приложение FastAPI и события
+app = FastAPI(title="Telegram Bot", version="1.4.0")
+@app.on_event("startup")
+async def _startup():
+# Запускаем инициализацию бота в фоне, не блокируя старт HTTP
+asyncio.create_task(_init_bot_background())
+@app.on_event("shutdown")
+async def _shutdown():
+global application
+try:
+    if application:
+        try:
+            await application.bot.delete_webhook(drop_pending_updates=False)
+        except Exception as e:
+            logger.warning("delete_webhook at shutdown warn: %s", e)
+        await application.stop()
+        await application.shutdown()
+except Exception as e:
+    logger.error("Shutdown error: %s", e, exc_info=True)
 @app.get("/")
 async def root():
 return {"message": "Telegram Bot работает!", "status": "OK"}
 @app.get("/health/live")
 async def health_live():
+# Всегда ok — сервис жив
 return {"status": "ok"}
 @app.get("/health/ready")
 async def health_ready():
+# Готовность, когда бот инициализирован
 try:
-    if not application:
+    if not bot_ready or not application:
         return JSONResponse({"status": "starting"}, status_code=503)
     me = await application.bot.get_me()
     return {"status": "ready", "bot_username": me.username}
 except Exception as e:
     return JSONResponse({"status": "not_ready", "error": str(e)}, status_code=503)
-ВАЖНО: быстрый вебхук — мгновенный 200 OK, обработка в фоне (чтобы не ловить 502/таймауты)
+Быстрый вебхук: мгновенный 200, обработка в фоне (важно для Railway)
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
-# 1) Проверка секрета
 secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
 if TELEGRAM_WEBHOOK_SECRET and secret != TELEGRAM_WEBHOOK_SECRET:
     return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
-# 2) Чтение JSON
 try:
     data = await request.json()
 except Exception:
     return JSONResponse({"ok": False, "error": "bad json"}, status_code=200)
-# 3) Если приложение не готово — быстрый 200, без ретраев
 if not application:
     return JSONResponse({"ok": False, "error": "app not ready"}, status_code=200)
-# 4) Сборка Update
 try:
     update = Update.de_json(data, application.bot)
 except Exception:
     return JSONResponse({"ok": False, "error": "invalid update"}, status_code=200)
-# 5) Фоновая обработка
-async def _bg_process(u: Update):
+async def _bg(u: Update):
     try:
         await application.process_update(u)
     except Exception as e:
         logger.error("Background process_update error: %s", e, exc_info=True)
 try:
-    asyncio.create_task(_bg_process(update))
+    asyncio.create_task(_bg(update))
 except Exception as e:
     logger.error("Schedule background update error: %s", e, exc_info=True)
-# 6) Немедленный успешный ответ
 return {"ok": True}
 if name == "main":
 mode = os.getenv("MODE", "webhook").lower()
