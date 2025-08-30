@@ -31,4 +31,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Важно: shell-форма CMD, чтобы подставлялся $PORT на Railway
 CMD gunicorn -k uvicorn.workers.UvicornWorker bot:app --bind 0.0.0.0:${PORT:-8000} --access-logfile - --error-logfile -
-Файл: .dockerignore
