@@ -5,8 +5,7 @@ import logging
 import tempfile
 from typing import Optional
 from fastapi import FastAPI, Request, Header, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
