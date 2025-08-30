@@ -1,34 +1,12 @@
 FROM python:3.11-slim
-ENV PIP_NO_CACHE_DIR=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
-ARG DEBIAN_FRONTEND=noninteractive
-RUN set -eux; \
-apt-get update; \
-apt-get install -y --no-install-recommends \
-  ca-certificates \
-  curl \
-  ffmpeg \
-; \
-update-ca-certificates; \
-rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-Копируем весь код (включая bot.py, serve.py и т.п.)
+RUN pip install --upgrade pip && pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
-Копируем entrypoint в системный путь
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-Чиним возможные CRLF и ставим +x на entrypoint
-RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh || true && chmod +x /usr/local/bin/entrypoint.sh
-Ловим синтаксические ошибки ещё на сборке
-RUN python -m py_compile /app/bot.py /app/serve.py
-Непривилегированный пользователь
-RUN groupadd -g 1001 app && useradd -u 1001 -g app -m -s /bin/bash app && chown -R app:app /app
-USER app
-Healthcheck (обратите внимание на правильное двоеточие и ${PORT:-8080})
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-CMD sh -lc 'curl -fsS "http://localhost😒{PORT:-8080}/health/live" || exit 1'
-Запуск через entrypoint
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+RUN sed -i 's/\r$//' /app/entrypoint.sh && cp /app/entrypoint.sh /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+RUN python -c 'import compileall,sys; sys.exit(0 if compileall.compile_dir("/app", force=True, quiet=1) else 1)'
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD sh -lc 'curl -fsS "http://localhost😒{PORT:-8080}/health/live" || exit 1'
+ENTRYPOINT
