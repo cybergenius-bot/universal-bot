@@ -1,448 +1,226 @@
 import os
-import io
+import json
 import asyncio
 import logging
-import subprocess
-import base64
-from typing import Optional, List
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+import tempfile
+from typing import Optional
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse, PlainTextResponse
+from pydantic import BaseModel
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-Логирование
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-logger = logging.getLogger("bot")
-Переменные окружения
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-WEBHOOK_PATH = "/telegram"
-WEBHOOK_URL = f"{PUBLIC_BASE_URL}{WEBHOOK_PATH}" if PUBLIC_BASE_URL else ""
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
-OPENAI_WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
-OpenAI SDK
-try:
 from openai import OpenAI
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-except Exception as e:
-logger.warning("OpenAI SDK init warn: %s", e)
-openai_client = None
-Глобально: PTB Application и флаг готовности
-application: Optional[Application] = None
-bot_ready: bool = False
-Утилиты
-class NamedBytesIO(io.BytesIO):
-def __init__(self, data: bytes, name: str):
-    super().__init__(data)
-    self.name = name
-def chunk_text(text: str, limit: int = 3500) -> List[str]:
-chunks: List[str] = []
-current: List[str] = []
-size = 0
-for line in text.splitlines(keepends=True):
-    if size + len(line) > limit and current:
-        chunks.append("".join(current))
-        current, size = [], 0
-    current.append(line)
-    size += len(line)
-if current:
-    chunks.append("".join(current))
-return chunks or [text]
-async def send_long_text(update: Update, text: str):
-for part in chunk_text(text, 3500):
-    await update.message.reply_text(part, disable_web_page_preview=True)
-async def tg_download_bytes(bot, file_id: str) -> bytes:
-tg_file = await bot.get_file(file_id)
-bio = io.BytesIO()
-await tg_file.download_to_memory(out=bio)
-return bio.getvalue()
-def ffmpeg_to_wav_sync(src: bytes) -> bytes:
-p = subprocess.run(
-    ["ffmpeg", "-loglevel", "error", "-y", "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"],
-    input=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+logging.basicConfig(
+level=logging.INFO,
+format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-return p.stdout
-def extract_keyframes_sync(src: bytes, frames: int = 3, scale_width: int = 640) -> List[bytes]:
-p = subprocess.run(
-    ["ffmpeg", "-loglevel", "error", "-y", "-i", "pipe:0",
-     "-vf", f"fps=1,scale={scale_width}:-1", "-vframes", str(frames),
-     "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
-    input=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
-)
-data = p.stdout
-imgs: List[bytes] = []
-SOI = b"\xff\xd8"; EOI = b"\xff\xd9"; i = 0
-while True:
-    s = data.find(SOI, i)
-    if s == -1: break
-    e = data.find(EOI, s)
-    if e == -1: break
-    imgs.append(data[s:e+2]); i = e + 2
-return imgs[:frames]
-def whisper_sync(data: bytes, name: str, lang: Optional[str] = "ru") -> str:
-if not openai_client:
-    raise RuntimeError("OPENAI_API_KEY не задан или OpenAI клиент не инициализирован.")
-text = openai_client.audio.transcriptions.create(
-    model=OPENAI_WHISPER_MODEL,
-    file=NamedBytesIO(data, name),
-    response_format="text",
-    language=lang or "ru",
-    temperature=0,
-)
-return text
-def _data_url(image_bytes: bytes) -> str:
-return "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
-def llm_generate_sync(prompt: str, system: str = "Ты внимательный и развернутый ассистент.", max_tokens: int = 1600, temperature: float = 0.7) -> str:
-if not openai_client:
-    raise RuntimeError("OPENAI_API_KEY не задан, текстовая генерация недоступна.")
-resp = openai_client.chat.completions.create(
-    model=OPENAI_TEXT_MODEL,
-    messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-    max_tokens=max_tokens,
-    temperature=temperature,
-)
-return (resp.choices[0].message.content or "").strip()
-def vision_analyze_sync(image_bytes: bytes, question: str = "Опиши подробно, что на фото, и извлеки важный текст.") -> str:
-if not openai_client:
-    raise RuntimeError("OPENAI_API_KEY не задан, визуальный анализ недоступен.")
-data_url = _data_url(image_bytes)
-resp = openai_client.chat.completions.create(
-    model=OPENAI_VISION_MODEL,
-    messages=[
-        {"role": "system", "content": "Ты визуальный помощник. Кратко перечисляй объекты, затем подробное описание и выводы. Если есть текст — процитируй его (OCR)."},
-        {"role": "user", "content": [{"type": "text", "text": question}, {"type": "image_url", "image_url": {"url": data_url}}]},
-    ],
-    max_tokens=900,
-    temperature=0.5,
-)
-return (resp.choices[0].message.content or "").strip()
-Команды
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text(
-    "Привет! 👋 Я универсальный ИИ-бот.\n"
-    "Умею: текст (подробные ответы и Stories), голос/аудио (распознаю), фото/видео (анализирую).\n"
-    "Команды: /help /story /pricing /buy /ref /status"
-)
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text(
-    "Справка:\n"
-    "• Пишите вопрос — отвечу развернуто\n"
-    "• Голос/аудио — распознаю текст\n"
-    "• Фото — опишу и извлеку текст\n"
-    "• Видео — извлеку аудио и кадры, сделаю краткое содержание\n"
-    "• /story <тема> — напишу объемный рассказ"
-)
-async def cmd_pricing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text("Тарифы: Free 5 Q, $10 → 20 Q, $30 → 200 Q, $50 → безлимит/мес.")
-async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text("Покупка скоро. В работе PayPal/Stripe/Telegram Stars.")
-async def cmd_ref(update: Update, context: ContextTypes.DEFAULT_TYPE):
-me = await context.bot.get_me()
-user = update.effective_user
-ref_param = f"ref{user.id}" if user else "ref0"
-await update.message.reply_text(f"Ваша реф. ссылка: https://t.me/{me.username}?start={ref_param}")
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-await update.message.reply_text("Статус: онлайн ✅")
-async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message:
-    return
-topic = (update.message.text or "").split(" ", 1)
-prompt = topic[1].strip() if len(topic) > 1 else "Свободная тема. Напиши вдохновляющий рассказ на 1200–1800 слов."
-try:
-    text = await asyncio.to_thread(
-        llm_generate_sync,
-        f"Напиши художественный рассказ с яркими сценами, диалогами, динамикой, сильной концовкой. Тема/ограничения: {prompt}",
-        "Ты опытный писатель. Пиши образно, структурировано, с логикой и стильными переходами.",
-        max_tokens=2000,
-        temperature=0.85,
-    )
-    await send_long_text(update, text or "Не удалось создать рассказ.")
-except Exception as e:
-    logger.exception("Story error: %s", e)
-    await update.message.reply_text("Ошибка генерации рассказа.")
-Текст
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.text:
-    return
-user_text = update.message.text.strip()
-lower = user_text.lower()
-if lower.startswith(("story:", "история:", "рассказ:")):
-    update.message.text = "/story " + user_text.split(":", 1)[1]
-    return await cmd_story(update, context)
-try:
-    text = await asyncio.to_thread(
-        llm_generate_sync,
-        f"Ответь максимально подробно и структурировано. Вопрос: {user_text}",
-        "Ты эксперт-ассистент. Даешь обстоятельные, практичные ответы.",
-        max_tokens=1400,
-        temperature=0.65,
-    )
-    await send_long_text(update, text or "Не удалось сгенерировать ответ.")
-except Exception as e:
-    logger.exception("Text LLM error: %s", e)
-    await update.message.reply_text("Ошибка генерации ответа.")
-Голос
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.voice:
-    return
-try:
-    ogg = await tg_download_bytes(context.bot, update.message.voice.file_id)
-    try:
-        text = await asyncio.to_thread(whisper_sync, ogg, "audio.ogg", "ru")
-    except Exception as e:
-        logger.warning("OGG→Whisper failed, try ffmpeg→WAV: %s", e)
-        wav = await asyncio.to_thread(ffmpeg_to_wav_sync, ogg)
-        text = await asyncio.to_thread(whisper_sync, wav, "audio.wav", "ru")
-    text = (text or "").strip()
-    if not text:
-        await update.message.reply_text("Не удалось распознать голос.")
-        return
-    answer = await asyncio.to_thread(
-        llm_generate_sync,
-        f"Сформулируй развернутый ответ на распознанный запрос: {text}",
-        "Ты эксперт-ассистент. Даешь обстоятельные ответы.",
-        max_tokens=1000,
-        temperature=0.6,
-    )
-    await send_long_text(update, answer or text)
-except Exception as e:
-    logger.exception("Voice STT/LLM error: %s", e)
-    await update.message.reply_text("Не удалось обработать голос. Попробуйте еще раз.")
-Аудио
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.audio:
-    return
-try:
-    b = await tg_download_bytes(context.bot, update.message.audio.file_id)
-    try:
-        name = (update.message.audio.file_name or "audio").lower()
-        txt = await asyncio.to_thread(whisper_sync, b, name, "ru")
-    except Exception:
-        wav = await asyncio.to_thread(ffmpeg_to_wav_sync, b)
-        txt = await asyncio.to_thread(whisper_sync, wav, "audio.wav", "ru")
-    txt = (txt or "").strip()
-    if not txt:
-        await update.message.reply_text("Не удалось распознать аудио.")
-        return
-    answer = await asyncio.to_thread(
-        llm_generate_sync,
-        f"Пользователь прислал аудио. Распознанный текст: {txt}. Дай развернутый ответ.",
-        "Ты эксперт-ассистент.",
-        max_tokens=1000,
-        temperature=0.6,
-    )
-    await send_long_text(update, answer or txt)
-except Exception as e:
-    logger.exception("Audio STT/LLM error: %s", e)
-    await update.message.reply_text("Не удалось обработать аудио.")
-Видеокружок
-async def handle_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.video_note:
-    return
-try:
-    mp4 = await tg_download_bytes(context.bot, update.message.video_note.file_id)
-    wav = await asyncio.to_thread(ffmpeg_to_wav_sync, mp4)
-    txt = await asyncio.to_thread(whisper_sync, wav, "circle.wav", "ru")
-    txt = (txt or "").strip()
-    if not txt:
-        await update.message.reply_text("Не удалось распознать кружок.")
-        return
-    summary = await asyncio.to_thread(
-        llm_generate_sync,
-        f"Суммаризируй и структурируй содержание: {txt}",
-        "Ты кратко пересказываешь и структурируешь.",
-        max_tokens=800,
-        temperature=0.6,
-    )
-    await send_long_text(update, summary or txt)
-except Exception as e:
-    logger.exception("VideoNote STT/LLM error: %s", e)
-    await update.message.reply_text("Не удалось обработать кружок.")
-Фото
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.photo:
-    return
-try:
-    best = update.message.photo[-1]
-    b = await tg_download_bytes(context.bot, best.file_id)
-    analysis = await asyncio.to_thread(
-        vision_analyze_sync,
-        b,
-        "Опиши предметы, действия и контекст; извлеки текст (если есть); сделай выводы.",
-    )
-    await send_long_text(update, analysis or "Не удалось проанализировать фото.")
-except Exception as e:
-    logger.exception("Photo vision error: %s", e)
-    await update.message.reply_text("Не удалось обработать фото.")
-Видео
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.video:
-    return
-try:
-    vid = await tg_download_bytes(context.bot, update.message.video.file_id)
-    wav = await asyncio.to_thread(ffmpeg_to_wav_sync, vid)
-    transcript = await asyncio.to_thread(whisper_sync, wav, "video.wav", "ru")
-    transcript = (transcript or "").strip()
-    summary = ""
-    if transcript:
-        summary = await asyncio.to_thread(
-            llm_generate_sync,
-            f"Кратко и структурно перескажи содержание видео (по транскрипту): {transcript}",
-            "Ты кратко пересказываешь и выделяешь ключевые пункты.",
-            max_tokens=900,
-            temperature=0.6,
-        )
-    frames = await asyncio.to_thread(extract_keyframes_sync, vid, 3, 640)
-    vision_parts: List[str] = []
-    for i, img in enumerate(frames, 1):
-        try:
-            part = await asyncio.to_thread(
-                vision_analyze_sync,
-                img,
-                f"Кадр {i}. Кратко: что видно, важные детали/текст.",
-            )
-            if part:
-                vision_parts.append(f"Кадр {i}:\n{part}")
-        except Exception as ex:
-            logger.warning("Vision frame %s error: %s", i, ex)
-    out = ""
-    if summary:
-        out += "Суммаризация по аудио:\n" + summary + "\n\n"
-    if vision_parts:
-        out += "Визуальный анализ кадров:\n" + "\n\n".join(vision_parts)
-    await send_long_text(update, out or "Не удалось проанализировать видео.")
-except Exception as e:
-    logger.exception("Video analyze error: %s", e)
-    await update.message.reply_text("Не удалось обработать видео.")
-Регистрация хендлеров
-def register_handlers(app_ptb: Application):
-app_ptb.add_handler(CommandHandler("start", cmd_start))
-app_ptb.add_handler(CommandHandler("help", cmd_help))
-app_ptb.add_handler(CommandHandler("pricing", cmd_pricing))
-app_ptb.add_handler(CommandHandler("buy", cmd_buy))
-app_ptb.add_handler(CommandHandler("ref", cmd_ref))
-app_ptb.add_handler(CommandHandler("status", cmd_status))
-app_ptb.add_handler(CommandHandler("story", cmd_story))
-app_ptb.add_handler(MessageHandler(filters.VOICE, handle_voice), group=0)
-app_ptb.add_handler(MessageHandler(filters.AUDIO, handle_audio), group=0)
-app_ptb.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_note), group=0)
-app_ptb.add_handler(MessageHandler(filters.VIDEO, handle_video), group=0)
-app_ptb.add_handler(MessageHandler(filters.PHOTO, handle_photo), group=0)
-app_ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text), group=1)
-Создание PTB Application
-def create_ptb_application() -> Application:
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN не установлен")
-app_ptb = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
-register_handlers(app_ptb)
-return app_ptb
-Фоновая инициализация бота (не блокирует старт сервера)
-async def _init_bot_background():
-global application, bot_ready
-bot_ready = False
-try:
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN не задан — бот не будет инициализирован (HTTP сервис работает).")
-        return
-    application = create_ptb_application()
-    await application.initialize()
-    await application.start()
-    if WEBHOOK_URL and TELEGRAM_WEBHOOK_SECRET:
-        try:
-            await application.bot.delete_webhook(drop_pending_updates=True)
-        except Exception as e:
-            logger.warning("delete_webhook warn: %s", e)
-        await application.bot.set_webhook(
-            url=WEBHOOK_URL,
-            secret_token=TELEGRAM_WEBHOOK_SECRET,
-            drop_pending_updates=True,
-            allowed_updates=[
-                "message", "edited_message", "callback_query", "chat_member",
-                "pre_checkout_query", "channel_post", "edited_channel_post",
-                "shipping_query",
-            ],
-        )
-        logger.info("Webhook установлен: %s", WEBHOOK_URL)
-    else:
-        logger.warning("PUBLIC_BASE_URL/TELEGRAM_WEBHOOK_SECRET не заданы — вебхук не установлен.")
-    bot_ready = True
-    logger.info("Bot init: готов к работе.")
-except Exception as e:
-    logger.error("Bot init error: %s", e, exc_info=True)
-    bot_ready = False
-Приложение FastAPI и события
-app = FastAPI(title="Telegram Bot", version="1.4.0")
-@app.on_event("startup")
-async def _startup():
-asyncio.create_task(_init_bot_background())
-@app.on_event("shutdown")
-async def _shutdown():
-global application
-try:
-    if application:
-        try:
-            await application.bot.delete_webhook(drop_pending_updates=False)
-        except Exception as e:
-            logger.warning("delete_webhook at shutdown warn: %s", e)
-        await application.stop()
-        await application.shutdown()
-except Exception as e:
-    logger.error("Shutdown error: %s", e, exc_info=True)
-@app.get("/")
-async def root():
-return {"message": "Telegram Bot работает!", "status": "OK"}
+logger = logging.getLogger("bot")
+app = FastAPI(title="universal-telegram-bot")
+class State:
+def __init__(self) -> None:
+    self.ready: bool = False
+    self.mode: str = os.getenv("MODE", "webhook")
+    self.application: Optional[Application] = None
+    self.webhook_url: Optional[str] = None
+    self.public_base_url: Optional[str] = os.getenv("PUBLIC_BASE_URL")
+    self.webhook_secret: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+    self.telegram_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
+    self.openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+    self.model_text: str = os.getenv("OPENAI_MODEL_TEXT", "gpt-4o-mini")
+    self.model_whisper: str = os.getenv("OPENAI_MODEL_WHISPER", "whisper-1")
+state = State()
 @app.get("/health/live")
 async def health_live():
-return {"status": "ok"}
+return JSONResponse({"status": "ok"})
 @app.get("/health/ready")
 async def health_ready():
-try:
-    if not bot_ready or not application:
-        return JSONResponse({"status": "starting"}, status_code=503)
-    me = await application.bot.get_me()
-    return {"status": "ready", "bot_username": me.username}
-except Exception as e:
-    return JSONResponse({"status": "not_ready", "error": str(e)}, status_code=503)
-Быстрый вебхук: мгновенный 200, обработка в фоне (важно для Railway)
+if state.ready and state.application is not None:
+    return JSONResponse({"status": "ready"})
+else:
+    return JSONResponse({"status": "starting"})
 @app.post("/telegram")
-async def telegram_webhook(request: Request):
-secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-if TELEGRAM_WEBHOOK_SECRET and secret != TELEGRAM_WEBHOOK_SECRET:
-    return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+async def telegram_webhook(
+request: Request,
+x_telegram_bot_api_secret_token: Optional[str] = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
+):
+if state.mode != "webhook":
+    raise HTTPException(status_code=503, detail="Webhook is not enabled")
+if state.application is None or state.application.bot is None:
+    raise HTTPException(status_code=503, detail="Application not initialized")
+expected = state.webhook_secret
+if expected:
+    if x_telegram_bot_api_secret_token != expected:
+        logger.warning("Webhook: secret token mismatch")
+        raise HTTPException(status_code=403, detail="Forbidden")
+else:
+    logger.warning("Webhook: TELEGRAM_WEBHOOK_SECRET is not set — secret check disabled")
 try:
     data = await request.json()
 except Exception:
-    return JSONResponse({"ok": False, "error": "bad json"}, status_code=200)
-if not application:
-    return JSONResponse({"ok": False, "error": "app not ready"}, status_code=200)
+    data = json.loads((await request.body()).decode("utf-8") or "{}")
 try:
-    update = Update.de_json(data, application.bot)
-except Exception:
-    return JSONResponse({"ok": False, "error": "invalid update"}, status_code=200)
-async def _bg(u: Update):
-    try:
-        await application.process_update(u)
-    except Exception as e:
-        logger.error("Background process_update error: %s", e, exc_info=True)
-try:
-    asyncio.create_task(_bg(update))
+    update = Update.de_json(data, state.application.bot)
 except Exception as e:
-    logger.error("Schedule background update error: %s", e, exc_info=True)
-return {"ok": True}
-if name == "main":
-mode = os.getenv("MODE", "webhook").lower()
-if mode == "polling":
-    app_ptb = create_ptb_application()
-    app_ptb.run_polling(
-        allowed_updates=[
-            "message", "edited_message", "callback_query", "chat_member",
-            "pre_checkout_query", "channel_post", "edited_channel_post",
-            "shipping_query",
+    logger.exception("Update parse error: %s", e)
+    raise HTTPException(status_code=400, detail="Bad update payload")
+asyncio.create_task(state.application.process_update(update))
+return JSONResponse({"ok": True})
+@app.on_event("startup")
+async def on_startup():
+asyncio.create_task(_background_init())
+async def _background_init():
+try:
+    await initialize_bot()
+    state.ready = True
+    logger.info("Initialization complete, ready")
+except Exception as e:
+    state.ready = False
+    logger.exception("Initialization failed: %s", e)
+async def initialize_bot():
+if not state.telegram_token:
+    logger.warning("TELEGRAM_BOT_TOKEN is not set — bot will not be initialized")
+    return
+application = Application.builder().token(state.telegram_token).build()
+application.add_handler(CommandHandler("start", on_cmd_start))
+application.add_handler(CommandHandler("help", on_cmd_help))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+application.add_handler(MessageHandler(filters.VOICE, on_voice))
+application.add_handler(MessageHandler(filters.AUDIO, on_audio))
+application.add_handler(MessageHandler(filters.PHOTO, on_photo))
+application.add_handler(MessageHandler(filters.VIDEO, on_video))
+await application.initialize()
+if state.mode == "webhook":
+    if not state.public_base_url:
+        logger.warning("PUBLIC_BASE_URL is not set — cannot configure webhook")
+    else:
+        webhook_url = state.public_base_url.rstrip("/") + "/telegram"
+        state.webhook_url = webhook_url
+        await application.bot.set_webhook(url=webhook_url, secret_token=state.webhook_secret)
+        logger.info("Webhook set: %s", webhook_url)
+await application.start()
+state.application = application
+def get_openai_client() -> Optional[OpenAI]:
+if not state.openai_api_key:
+    logger.warning("OPENAI_API_KEY is not set — AI features disabled")
+    return None
+return OpenAI(api_key=state.openai_api_key)
+async def on_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.effective_message.reply_text(
+    "Hi! I am a universal bot: text, voice/audio (Whisper), photo/video (basic), and long-form answers/Stories."
+)
+async def on_cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.effective_message.reply_text(
+    "Available:\n"
+    "- Text: analysis, summaries, Stories.\n"
+    "- Voice/Audio: Whisper transcription.\n"
+    "- Photo/Video: basic analysis.\n"
+    "Running in webhook mode; use polling only for local debugging."
+)
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+text = update.effective_message.text or ""
+client = get_openai_client()
+if not client:
+    await update.effective_message.reply_text("Received text, but AI is unavailable (no OPENAI_API_KEY).")
+    return
+try:
+    completion = client.chat.completions.create(
+        model=state.model_text,
+        messages=[
+            {"role": "system", "content": "You are a concise and structured assistant."},
+            {"role": "user", "content": f"Create a short, structured explanation/Story on:\n{text}"},
         ],
-        drop_pending_updates=True,
+        temperature=0.4,
     )
-else:
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
+    reply = completion.choices[0].message.content or "Done."
+except Exception as e:
+    logger.exception("Generation error: %s", e)
+    reply = "Failed to generate an answer."
+for chunk in split_long_message(reply):
+    await update.effective_message.reply_text(chunk)
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+if not update.effective_message or not update.effective_message.voice:
+    return
+client = get_openai_client()
+if not client:
+    await update.effective_message.reply_text("AI for transcription is unavailable (no OPENAI_API_KEY).")
+    return
+voice = update.effective_message.voice
+file = await voice.get_file()
+with tempfile.TemporaryDirectory() as td:
+    ogg_path = os.path.join(td, "audio.ogg")
+    wav_path = os.path.join(td, "audio.wav")
+    await file.download_to_drive(ogg_path)
+    await ffmpeg_to_wav(ogg_path, wav_path)
+    text = await whisper_transcribe(client, wav_path)
+    await update.effective_message.reply_text(f"Transcribed text:\n{text}")
+async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+if not update.effective_message or not update.effective_message.audio:
+    return
+client = get_openai_client()
+if not client:
+    await update.effective_message.reply_text("AI for transcription is unavailable (no OPENAI_API_KEY).")
+    return
+audio = update.effective_message.audio
+file = await audio.get_file()
+with tempfile.TemporaryDirectory() as td:
+    in_path = os.path.join(td, "audio_input")
+    wav_path = os.path.join(td, "audio.wav")
+    await file.download_to_drive(in_path)
+    await ffmpeg_to_wav(in_path, wav_path)
+    text = await whisper_transcribe(client, wav_path)
+    await update.effective_message.reply_text(f"Transcribed text:\n{text}")
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+if not update.effective_message or not update.effective_message.photo:
+    return
+client = get_openai_client()
+if not client:
+    await update.effective_message.reply_text("AI for image analysis is unavailable (no OPENAI_API_KEY).")
+    return
+await update.effective_message.reply_text("Photo received. Basic image analysis is enabled.")
+async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.effective_message.reply_text("Video received. Keyframe extraction and analysis are in basic mode.")
+def split_long_message(text: str, limit: int = 3500):
+out = []
+buf = []
+size = 0
+for line in text.splitlines(True):
+    if size + len(line) > limit and buf:
+        out.append("".join(buf))
+        buf = [line]
+        size = len(line)
+    else:
+        buf.append(line)
+        size += len(line)
+if buf:
+    out.append("".join(buf))
+return out or [text]
+async def ffmpeg_to_wav(src_path: str, dst_path: str):
+cmd = [
+    "ffmpeg", "-y",
+    "-i", src_path,
+    "-ar", "16000",
+    "-ac", "1",
+    "-f", "wav",
+    dst_path
+]
+logger.info("FFmpeg: %s", " ".join(cmd))
+proc = await asyncio.create_subprocess_exec(
+    *cmd,
+    stdout=asyncio.subprocess.DEVNULL,
+    stderr=asyncio.subprocess.DEVNULL,
+)
+rc = await proc.wait()
+if rc != 0:
+    raise RuntimeError(f"ffmpeg exited with code {rc}")
+async def whisper_transcribe(client: OpenAI, wav_path: str) -> str:
+try:
+    with open(wav_path, "rb") as f:
+        result = client.audio.transcriptions.create(
+            model=state.model_whisper,
+            file=f
+        )
+    text = getattr(result, "text", None) or str(result)
+    return text
+except Exception as e:
+    logger.exception("Whisper error: %s", e)
+    return "Failed to transcribe audio."
