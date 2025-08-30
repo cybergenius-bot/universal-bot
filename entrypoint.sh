@@ -1,8 +1,8 @@
 #!/bin/sh
 set -euo pipefail
-: "${PORT:=8000}" # Порт сервера
+: "${PORT:=8000}"
 : "${MODE:=webhook}" # webhook | polling
-: "${WORKERS:=1}" # Кол-во воркеров Gunicorn
+: "${WORKERS:=1}"
 : "${LOG_LEVEL:=info}" # debug|info|warning|error|critical
 echo "[entrypoint] Preflight: проверка импорта bot:app..."
 python - <<'PY'
