@@ -17,12 +17,12 @@ RUN pip install --upgrade pip && \
 
 COPY . /app
 
-# Fix possible CRLF for entrypoint and make it executable
+# Ensure LF endings and executable bit for entrypoint
 RUN sed -i 's/\r$//' /app/entrypoint.sh && \
     cp /app/entrypoint.sh /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
-# Pre-compile to catch syntax errors at build time
+# Catch syntax errors during build
 RUN python -c 'import compileall,sys; sys.exit(0 if compileall.compile_dir("/app", force=True, quiet=1) else 1)'
 
 EXPOSE 8080
