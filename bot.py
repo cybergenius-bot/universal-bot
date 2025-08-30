@@ -10,10 +10,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
----------- Логирование ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("bot")
----------- Переменные окружения ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
@@ -23,16 +21,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_TEXT_MODEL = os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini")
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
 OPENAI_WHISPER_MODEL = os.getenv("OPENAI_WHISPER_MODEL", "whisper-1")
----------- OpenAI SDK ----------
 try:
 from openai import OpenAI
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 except Exception as e:
 logger.warning("OpenAI SDK init warn: %s", e)
 openai_client = None
----------- Глобально: PTB Application ----------
 application: Optional[Application] = None
----------- Утилиты ----------
 class NamedBytesIO(io.BytesIO):
 def __init__(self, data: bytes, name: str):
     super().__init__(data)
@@ -65,9 +60,6 @@ p = subprocess.run(
 )
 return p.stdout
 def extract_keyframes_sync(src: bytes, frames: int = 3, scale_width: int = 640) -> List[bytes]:
-"""
-Извлекает до N кадров из видео (примерно равномерно) и возвращает список JPEG байт.
-"""
 p = subprocess.run(
     ["ffmpeg", "-loglevel", "error", "-y", "-i", "pipe:0",
      "-vf", f"fps=1,scale={scale_width}:-1", "-vframes", str(frames),
@@ -76,16 +68,12 @@ p = subprocess.run(
 )
 data = p.stdout
 imgs = []
-SOI = b"\xff\xd8"
-EOI = b"\xff\xd9"
-i = 0
+SOI = b"\xff\xd8"; EOI = b"\xff\xd9"; i = 0
 while True:
     s = data.find(SOI, i)
-    if s == -1:
-        break
+    if s == -1: break
     e = data.find(EOI, s)
-    if e == -1:
-        break
+    if e == -1: break
     imgs.append(data[s:e+2])
     i = e + 2
 return imgs[:frames]
@@ -101,16 +89,14 @@ text = openai_client.audio.transcriptions.create(
 )
 return text
 def _data_url(image_bytes: bytes) -> str:
-return "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii")
+import base64 as _b64
+return "data:image/jpeg;base64," + _b64.b64encode(image_bytes).decode("ascii")
 def llm_generate_sync(prompt: str, system: str = "Ты внимательный и развернутый ассистент.", max_tokens: int = 1600, temperature: float = 0.7) -> str:
 if not openai_client:
     raise RuntimeError("OPENAI_API_KEY не задан, текстовая генерация недоступна.")
 resp = openai_client.chat.completions.create(
     model=OPENAI_TEXT_MODEL,
-    messages=[
-        {"role": "system", "content": system},
-        {"role": "user", "content": prompt},
-    ],
+    messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
     max_tokens=max_tokens,
     temperature=temperature,
 )
@@ -122,17 +108,13 @@ data_url = _data_url(image_bytes)
 resp = openai_client.chat.completions.create(
     model=OPENAI_VISION_MODEL,
     messages=[
-        {"role": "system", "content": "Ты визуальный помощник. Кратко перечисляй объекты, затем делай подробное описание и выводы. Если есть текст — процитируй его (OCR)."},
-        {"role": "user", "content": [
-            {"type": "text", "text": question},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ]},
+        {"role": "system", "content": "Ты визуальный помощник. Кратко перечисляй объекты, затем подробное описание и выводы. Если есть текст — процитируй его (OCR)."},
+        {"role": "user", "content": [{"type": "text", "text": question}, {"type": "image_url", "image_url": {"url": data_url}}]},
     ],
     max_tokens=900,
     temperature=0.5,
 )
 return (resp.choices[0].message.content or "").strip()
----------- Команды ----------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text(
     "Привет! 👋 Я универсальный ИИ‑бот.\n"
@@ -160,8 +142,7 @@ await update.message.reply_text(f"Ваша реф. ссылка: https://t.me/{m
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text("Статус: онлайн ✅")
 async def cmd_story(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message:
-    return
+if not update.message: return
 topic = (update.message.text or "").split(" ", 1)
 prompt = topic[1].strip() if len(topic) > 1 else "Свободная тема. Напиши вдохновляющий рассказ на 1200–1800 слов."
 try:
@@ -169,23 +150,17 @@ try:
         llm_generate_sync,
         f"Напиши художественный рассказ с яркими сценами, диалогами, динамикой, сильной концовкой. Тема/ограничения: {prompt}",
         "Ты опытный писатель. Пиши образно, структурировано, с логикой и стильными переходами.",
-        max_tokens=2000,
-        temperature=0.85,
+        max_tokens=2000, temperature=0.85,
     )
-    if not text:
-        await update.message.reply_text("Не удалось создать рассказ. Попробуйте изменить тему.")
-        return
-    await send_long_text(update, text)
+    await send_long_text(update, text or "Не удалось создать рассказ.")
 except Exception as e:
     logger.exception("Story error: %s", e)
     await update.message.reply_text("Ошибка генерации рассказа.")
----------- Текст ----------
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.text:
-    return
+if not update.message or not update.message.text: return
 user_text = update.message.text.strip()
 lower = user_text.lower()
-if lower.startswith("story:") or lower.startswith("история:") or lower.startswith("рассказ:"):
+if lower.startswith(("story:", "история:", "рассказ:")):
     update.message.text = "/story " + user_text.split(":", 1)[1]
     return await cmd_story(update, context)
 try:
@@ -193,17 +168,14 @@ try:
         llm_generate_sync,
         f"Ответь максимально подробно и структурировано. Вопрос: {user_text}",
         "Ты эксперт‑ассистент. Даёшь обстоятельные, практичные ответы.",
-        max_tokens=1400,
-        temperature=0.65,
+        max_tokens=1400, temperature=0.65,
     )
     await send_long_text(update, text or "Не удалось сгенерировать ответ.")
 except Exception as e:
     logger.exception("Text LLM error: %s", e)
     await update.message.reply_text("Ошибка генерации ответа.")
----------- Голос ----------
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.voice:
-    return
+if not update.message or not update.message.voice: return
 try:
     ogg = await tg_download_bytes(context.bot, update.message.voice.file_id)
     try:
@@ -213,24 +185,19 @@ try:
         wav = await asyncio.to_thread(ffmpeg_to_wav_sync, ogg)
         text = await asyncio.to_thread(whisper_sync, wav, "audio.wav", "ru")
     text = (text or "").strip()
-    if not text:
-        await update.message.reply_text("Не удалось распознать голос.")
-        return
+    if not text: return await update.message.reply_text("Не удалось распознать голос.")
     answer = await asyncio.to_thread(
         llm_generate_sync,
         f"Сформулируй развёрнутый ответ на распознанный запрос: {text}",
         "Ты эксперт‑ассистент. Даёшь обстоятельные ответы.",
-        max_tokens=1000,
-        temperature=0.6,
+        max_tokens=1000, temperature=0.6,
     )
     await send_long_text(update, answer or text)
 except Exception as e:
     logger.exception("Voice STT/LLM error: %s", e)
     await update.message.reply_text("Не удалось обработать голос. Попробуйте ещё раз.")
----------- Аудио ----------
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.audio:
-    return
+if not update.message or not update.message.audio: return
 try:
     b = await tg_download_bytes(context.bot, update.message.audio.file_id)
     try:
@@ -240,61 +207,41 @@ try:
         wav = await asyncio.to_thread(ffmpeg_to_wav_sync, b)
         txt = await asyncio.to_thread(whisper_sync, wav, "audio.wav", "ru")
     txt = (txt or "").strip()
-    if not txt:
-        await update.message.reply_text("Не удалось распознать аудио.")
-        return
+    if not txt: return await update.message.reply_text("Не удалось распознать аудио.")
     answer = await asyncio.to_thread(
         llm_generate_sync,
         f"Пользователь прислал аудио. Распознанный текст: {txt}. Дай развёрнутый ответ.",
-        max_tokens=1000,
-        temperature=0.6,
+        max_tokens=1000, temperature=0.6,
     )
     await send_long_text(update, answer or txt)
 except Exception as e:
     logger.exception("Audio STT/LLM error: %s", e)
     await update.message.reply_text("Не удалось обработать аудио.")
----------- Видеокружок ----------
 async def handle_video_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.video_note:
-    return
+if not update.message or not update.message.video_note: return
 try:
     mp4 = await tg_download_bytes(context.bot, update.message.video_note.file_id)
     wav = await asyncio.to_thread(ffmpeg_to_wav_sync, mp4)
     txt = await asyncio.to_thread(whisper_sync, wav, "circle.wav", "ru")
     txt = (txt or "").strip()
-    if not txt:
-        await update.message.reply_text("Не удалось распознать кружок.")
-        return
-    summary = await asyncio.to_thread(
-        llm_generate_sync,
-        f"Суммаризируй и структурируй содержание: {txt}",
-        max_tokens=800,
-    )
+    if not txt: return await update.message.reply_text("Не удалось распознать кружок.")
+    summary = await asyncio.to_thread(llm_generate_sync, f"Суммаризируй и структурируй содержание: {txt}", max_tokens=800)
     await send_long_text(update, summary or txt)
 except Exception as e:
     logger.exception("VideoNote STT/LLM error: %s", e)
     await update.message.reply_text("Не удалось обработать кружок.")
----------- Фото ----------
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.photo:
-    return
+if not update.message or not update.message.photo: return
 try:
-    photo_sizes = update.message.photo
-    best = photo_sizes[-1]
+    best = update.message.photo[-1]
     b = await tg_download_bytes(context.bot, best.file_id)
-    analysis = await asyncio.to_thread(
-        vision_analyze_sync,
-        b,
-        "Опиши предметы, действия и контекст; извлеки текст (если есть); предположи назначение/сценарий использования.",
-    )
+    analysis = await asyncio.to_thread(vision_analyze_sync, b, "Опиши предметы, контекст; извлеки текст (если есть); сделай выводы.")
     await send_long_text(update, analysis or "Не удалось проанализировать фото.")
 except Exception as e:
     logger.exception("Photo vision error: %s", e)
     await update.message.reply_text("Не удалось обработать фото.")
----------- Видео ----------
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-if not update.message or not update.message.video:
-    return
+if not update.message or not update.message.video: return
 try:
     vid = await tg_download_bytes(context.bot, update.message.video.file_id)
     wav = await asyncio.to_thread(ffmpeg_to_wav_sync, vid)
@@ -302,34 +249,22 @@ try:
     transcript = (transcript or "").strip()
     summary = ""
     if transcript:
-        summary = await asyncio.to_thread(
-            llm_generate_sync,
-            f"Кратко и структурно перескажи содержание видео (по транскрипту): {transcript}",
-            max_tokens=900,
-        )
+        summary = await asyncio.to_thread(llm_generate_sync, f"Кратко перескажи содержание видео (по транскрипту): {transcript}", max_tokens=900)
     frames = await asyncio.to_thread(extract_keyframes_sync, vid, 3, 640)
     vision_parts: List[str] = []
     for i, img in enumerate(frames, 1):
         try:
-            part = await asyncio.to_thread(
-                vision_analyze_sync,
-                img,
-                f"Кадр {i}. Кратко: что видно, важные детали/текст.",
-            )
-            if part:
-                vision_parts.append(f"Кадр {i}:\n{part}")
+            part = await asyncio.to_thread(vision_analyze_sync, img, f"Кадр {i}. Кратко: что видно, важные детали/текст.")
+            if part: vision_parts.append(f"Кадр {i}:\n{part}")
         except Exception as ex:
             logger.warning("Vision frame %s error: %s", i, ex)
     out = ""
-    if summary:
-        out += "Суммаризация по аудио:\n" + summary + "\n\n"
-    if vision_parts:
-        out += "Визуальный анализ кадров:\n" + "\n\n".join(vision_parts)
+    if summary: out += "Суммаризация по аудио:\n" + summary + "\n\n"
+    if vision_parts: out += "Визуальный анализ кадров:\n" + "\n\n".join(vision_parts)
     await send_long_text(update, out or "Не удалось проанализировать видео.")
 except Exception as e:
     logger.exception("Video analyze error: %s", e)
     await update.message.reply_text("Не удалось обработать видео.")
----------- Регистрация хендлеров ----------
 def register_handlers(app_ptb: Application):
 app_ptb.add_handler(CommandHandler("start", cmd_start))
 app_ptb.add_handler(CommandHandler("help", cmd_help))
@@ -344,14 +279,12 @@ app_ptb.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_video_note), group
 app_ptb.add_handler(MessageHandler(filters.VIDEO, handle_video), group=0)
 app_ptb.add_handler(MessageHandler(filters.PHOTO, handle_photo), group=0)
 app_ptb.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text), group=1)
----------- Создание PTB Application ----------
 def create_ptb_application() -> Application:
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не установлен")
 app_ptb = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
 register_handlers(app_ptb)
 return app_ptb
----------- FastAPI lifespan ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 global application
@@ -369,11 +302,7 @@ try:
             url=WEBHOOK_URL,
             secret_token=TELEGRAM_WEBHOOK_SECRET,
             drop_pending_updates=True,
-            allowed_updates=[
-                "message", "edited_message", "callback_query", "chat_member",
-                "pre_checkout_query", "channel_post", "edited_channel_post",
-                "shipping_query",
-            ],
+            allowed_updates=["message","edited_message","callback_query","chat_member","pre_checkout_query","channel_post","edited_channel_post","shipping_query"],
         )
         logger.info("✅ Webhook установлен: %s", WEBHOOK_URL)
     else:
@@ -394,7 +323,6 @@ finally:
             await application.shutdown()
     except Exception as e:
         logger.error("Shutdown error: %s", e, exc_info=True)
----------- Приложение FastAPI ----------
 app = FastAPI(title="Telegram Bot", version="1.1.0", lifespan=lifespan)
 @app.get("/")
 async def root():
@@ -426,7 +354,6 @@ try:
     if update:
         await application.process_update(update)
         return {"ok": True}
-    logger.warning("Получен некорректный update")
     return JSONResponse({"ok": False, "error": "invalid update"}, status_code=200)
 except Exception as e:
     logger.error("Webhook handle error: %s", e, exc_info=True)
@@ -436,45 +363,9 @@ mode = os.getenv("MODE", "webhook").lower()
 if mode == "polling":
     app_ptb = create_ptb_application()
     app_ptb.run_polling(
-        allowed_updates=[
-            "message", "edited_message", "callback_query", "chat_member",
-            "pre_checkout_query", "channel_post", "edited_channel_post",
-            "shipping_query",
-        ],
+        allowed_updates=["message","edited_message","callback_query","chat_member","pre_checkout_query","channel_post","edited_channel_post","shipping_query"],
         drop_pending_updates=True,
     )
 else:
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
-entrypoint.sh
-
-#!/bin/sh
-set -euo pipefail
-: "${PORT:=8000}" # Порт сервера
-: "${MODE:=webhook}" # webhook | polling
-: "${WORKERS:=1}" # Кол-во воркеров Gunicorn
-: "${LOG_LEVEL:=info}" # debug|info|warning|error|critical
-echo "[entrypoint] Preflight: проверка импорта bot:app..."
-python - <<'PY'
-import sys, importlib, os
-print("cwd=", os.getcwd())
-m = importlib.import_module("bot")
-print("bot.file=", getattr(m, "file", None))
-ok = hasattr(m, "app")
-print("hasattr(bot,'app')=", ok)
-if not ok: raise SystemExit("В модуле bot нет переменной 'app'. Проверьте имя и путь.")
-PY
-if [ "$MODE" = "webhook" ]; then
-echo "[entrypoint] Режим: webhook. Запуск Gunicorn/Uvicorn..."
-exec gunicorn --chdir /app -k uvicorn.workers.UvicornWorker "bot:app" \
---bind "0.0.0.0:${PORT}" \
---workers "${WORKERS}" \
---timeout 120 \
---graceful-timeout 30 \
---log-level "${LOG_LEVEL}" \
---access-logfile - \
---error-logfile -
-else
-echo "[entrypoint] Режим: polling. Запуск python bot.py..."
-exec python bot.py
-fi
