@@ -1,9 +1,9 @@
 #!/bin/sh
 set -euo pipefail
 : "${PORT:=8000}"
-: "${MODE:=webhook}" # webhook | polling
+: "${MODE:=webhook}"
 : "${WORKERS:=1}"
-: "${LOG_LEVEL:=info}" # debug|info|warning|error|critical
+: "${LOG_LEVEL:=info}"
 echo "[entrypoint] Preflight: проверка импорта bot:app..."
 python - <<'PY'
 import sys, importlib, os
