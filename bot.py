@@ -376,7 +376,6 @@ except Exception as e:
 app = FastAPI(title="Telegram Bot", version="1.4.0")
 @app.on_event("startup")
 async def _startup():
-# Запускаем инициализацию бота в фоне, не блокируя старт HTTP
 asyncio.create_task(_init_bot_background())
 @app.on_event("shutdown")
 async def _shutdown():
@@ -396,11 +395,9 @@ async def root():
 return {"message": "Telegram Bot работает!", "status": "OK"}
 @app.get("/health/live")
 async def health_live():
-# Всегда ok — сервис жив
 return {"status": "ok"}
 @app.get("/health/ready")
 async def health_ready():
-# Готовность, когда бот инициализирован
 try:
     if not bot_ready or not application:
         return JSONResponse({"status": "starting"}, status_code=503)
