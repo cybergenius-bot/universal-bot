@@ -68,14 +68,12 @@ def extract_keyframes_sync(src: bytes, frames: int = 3, scale_width: int = 640) 
 """
 Извлекает до N кадров из видео (примерно равномерно) и возвращает список JPEG байт.
 """
-# ffmpeg: выбираем кадры через select=not(mod(n,interval)); для неизвестной длины используем fps=1 как упрощение
 p = subprocess.run(
     ["ffmpeg", "-loglevel", "error", "-y", "-i", "pipe:0",
      "-vf", f"fps=1,scale={scale_width}:-1", "-vframes", str(frames),
      "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
     input=src, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
 )
-# Разделить поток JPEG кадров невозможно без маркеров; используем простой парсер по SOI/EOI
 data = p.stdout
 imgs = []
 SOI = b"\xff\xd8"
@@ -144,11 +142,11 @@ await update.message.reply_text(
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text(
     "Справка:\n"
-    "• Просто пишите вопрос — отвечу развёрнуто\n"
-    "• Отправьте голос/аудио — распознаю текст\n"
-    "• Отправьте фото — опишу и извлеку текст\n"
-    "• Отправьте видео — извлеку аудио, сделаю краткое содержание\n"
-    "• /story <тема|жанр|ограничения> — напишу объёмный рассказ"
+    "• Пишите вопрос — отвечу развёрнуто\n"
+    "• Голос/аудио — распознаю текст\n"
+    "• Фото — опишу и извлеку текст\n"
+    "• Видео — извлеку аудио и кадры, сделаю краткое содержание\n"
+    "• /story <тема> — напишу объёмный рассказ"
 )
 async def cmd_pricing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text("Тарифы: Free 5 Q, $10 → 20 Q, $30 → 200 Q, $50 → безлимит/мес.")
@@ -186,7 +184,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if not update.message or not update.message.text:
     return
 user_text = update.message.text.strip()
-# Триггер для Stories по ключевым словам
 lower = user_text.lower()
 if lower.startswith("story:") or lower.startswith("история:") or lower.startswith("рассказ:"):
     update.message.text = "/story " + user_text.split(":", 1)[1]
@@ -194,8 +191,8 @@ if lower.startswith("story:") or lower.startswith("история:") or lower.st
 try:
     text = await asyncio.to_thread(
         llm_generate_sync,
-        f"Ответь максимально подробно и структурировано. Вопрос/запрос пользователя: {user_text}",
-        "Ты эксперт‑ассистент. Даёшь обстоятельные, практичные, структурированные ответы.",
+        f"Ответь максимально подробно и структурировано. Вопрос: {user_text}",
+        "Ты эксперт‑ассистент. Даёшь обстоятельные, практичные ответы.",
         max_tokens=1400,
         temperature=0.65,
     )
@@ -219,7 +216,6 @@ try:
     if not text:
         await update.message.reply_text("Не удалось распознать голос.")
         return
-    # Сгенерировать развернутый ответ на основе распознанного текста
     answer = await asyncio.to_thread(
         llm_generate_sync,
         f"Сформулируй развёрнутый ответ на распознанный запрос: {text}",
@@ -301,7 +297,6 @@ if not update.message or not update.message.video:
     return
 try:
     vid = await tg_download_bytes(context.bot, update.message.video.file_id)
-    # 1) Извлечь аудио → STT → summary
     wav = await asyncio.to_thread(ffmpeg_to_wav_sync, vid)
     transcript = await asyncio.to_thread(whisper_sync, wav, "video.wav", "ru")
     transcript = (transcript or "").strip()
@@ -312,7 +307,6 @@ try:
             f"Кратко и структурно перескажи содержание видео (по транскрипту): {transcript}",
             max_tokens=900,
         )
-    # 2) Извлечь несколько кадров → vision анализ
     frames = await asyncio.to_thread(extract_keyframes_sync, vid, 3, 640)
     vision_parts: List[str] = []
     for i, img in enumerate(frames, 1):
@@ -419,7 +413,6 @@ except Exception as e:
     return JSONResponse({"status": "not_ready", "error": str(e)}, status_code=503)
 @app.post("/telegram")
 async def telegram_webhook(request: Request):
-# Проверка секрета
 secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
 if TELEGRAM_WEBHOOK_SECRET and secret != TELEGRAM_WEBHOOK_SECRET:
     logger.warning("Webhook 401: секрет не совпал")
@@ -437,7 +430,6 @@ try:
     return JSONResponse({"ok": False, "error": "invalid update"}, status_code=200)
 except Exception as e:
     logger.error("Webhook handle error: %s", e, exc_info=True)
-    # Возвращаем 200, чтобы Telegram не долбил ретраями
     return JSONResponse({"ok": True})
 if name == "main":
 mode = os.getenv("MODE", "webhook").lower()
@@ -454,3 +446,35 @@ if mode == "polling":
 else:
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
+entrypoint.sh
+
+#!/bin/sh
+set -euo pipefail
+: "${PORT:=8000}" # Порт сервера
+: "${MODE:=webhook}" # webhook | polling
+: "${WORKERS:=1}" # Кол-во воркеров Gunicorn
+: "${LOG_LEVEL:=info}" # debug|info|warning|error|critical
+echo "[entrypoint] Preflight: проверка импорта bot:app..."
+python - <<'PY'
+import sys, importlib, os
+print("cwd=", os.getcwd())
+m = importlib.import_module("bot")
+print("bot.file=", getattr(m, "file", None))
+ok = hasattr(m, "app")
+print("hasattr(bot,'app')=", ok)
+if not ok: raise SystemExit("В модуле bot нет переменной 'app'. Проверьте имя и путь.")
+PY
+if [ "$MODE" = "webhook" ]; then
+echo "[entrypoint] Режим: webhook. Запуск Gunicorn/Uvicorn..."
+exec gunicorn --chdir /app -k uvicorn.workers.UvicornWorker "bot:app" \
+--bind "0.0.0.0:${PORT}" \
+--workers "${WORKERS}" \
+--timeout 120 \
+--graceful-timeout 30 \
+--log-level "${LOG_LEVEL}" \
+--access-logfile - \
+--error-logfile -
+else
+echo "[entrypoint] Режим: polling. Запуск python bot.py..."
+exec python bot.py
+fi
