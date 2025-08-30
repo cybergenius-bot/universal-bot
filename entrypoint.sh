@@ -59,7 +59,6 @@ rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY . /app
-Проверка синтаксиса (важно!) — ловим ошибки ещё на сборке
 RUN python -m py_compile /app/bot.py /app/serve.py
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
