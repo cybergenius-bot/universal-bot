@@ -1,3 +1,8 @@
+# удалить неверно названный файл, даже если Windows его не показывает
+git rm -f ".dockerignore."
+
+# создать новый корректный .dockerignore
+cat > .dockerignore << 'EOF'
 .git
 .gitignore
 __pycache__/
@@ -14,3 +19,4 @@ dist/
 .DS_Store
 README.md
 tests/
+EOF
