@@ -9,14 +9,12 @@ from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from openai import OpenAI
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("telegram").setLevel(logging.DEBUG)
 logger = logging.getLogger("bot")
 
@@ -32,6 +30,7 @@ class State:
         self.webhook_secret: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET")
         self.telegram_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
         self.openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+        self.admin_token: Optional[str] = os.getenv("ADMIN_TOKEN")
         self.model_text: str = os.getenv("OPENAI_MODEL_TEXT", "gpt-4o-mini")
         self.model_whisper: str = os.getenv("OPENAI_MODEL_WHISPER", "whisper-1")
 
@@ -54,11 +53,34 @@ async def health_diag():
     return JSONResponse({
         "mode": state.mode,
         "ready": state.ready,
+        "app_inited": bool(state.application),
         "has_token": bool(state.telegram_token),
         "has_base_url": bool(state.public_base_url),
         "has_secret": bool(state.webhook_secret),
         "webhook_url": state.webhook_url or None,
     })
+
+# Admin endpoint to (re)install webhook after start
+@app.post("/admin/set_webhook")
+async def admin_set_webhook(
+    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
+):
+    if not state.admin_token or x_admin_token != state.admin_token:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not state.application or not state.public_base_url:
+        raise HTTPException(status_code=503, detail="App not initialized or no PUBLIC_BASE_URL")
+    webhook_url = state.public_base_url.rstrip("/") + "/telegram"
+    try:
+        ok = await state.application.bot.set_webhook(
+            url=webhook_url,
+            secret_token=state.webhook_secret,
+            drop_pending_updates=True
+        )
+        state.webhook_url = webhook_url
+        return JSONResponse({"ok": bool(ok), "url": webhook_url})
+    except TelegramError as e:
+        logger.exception("admin set_webhook failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/telegram")
 async def telegram_webhook(
@@ -117,6 +139,8 @@ async def initialize_bot():
         return
 
     application = Application.builder().token(state.telegram_token).build()
+
+    # Handlers
     application.add_handler(CommandHandler("start", on_cmd_start))
     application.add_handler(CommandHandler("help", on_cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
@@ -125,23 +149,28 @@ async def initialize_bot():
     application.add_handler(MessageHandler(filters.PHOTO, on_photo))
     application.add_handler(MessageHandler(filters.VIDEO, on_video))
 
+    # Initialize PTB internals
     await application.initialize()
 
-    if state.mode == "webhook":
-        if not state.public_base_url:
-            logger.warning("PUBLIC_BASE_URL is not set - cannot configure webhook")
-        else:
-            webhook_url = state.public_base_url.rstrip("/") + "/telegram"
-            state.webhook_url = webhook_url
-            await application.bot.set_webhook(
+    # Сохраняем ссылку РАНЬШЕ, чтобы /telegram перестал отдавать 503 даже при неудачном вебхуке
+    state.application = application
+
+    # Пытаемся поставить вебхук, но не падаем, если не вышло — логируем причину
+    if state.mode == "webhook" and state.public_base_url:
+        webhook_url = state.public_base_url.rstrip("/") + "/telegram"
+        state.webhook_url = webhook_url
+        try:
+            ok = await application.bot.set_webhook(
                 url=webhook_url,
                 secret_token=state.webhook_secret,
                 drop_pending_updates=True
             )
-            logger.info("Webhook set: %s", webhook_url)
+            logger.info("Webhook set: %s (ok=%s)", webhook_url, ok)
+        except TelegramError as e:
+            logger.exception("set_webhook failed: %s", e)
 
+    # Start PTB subsystems (JobQueue, etc.)
     await application.start()
-    state.application = application
 
 def get_openai_client() -> Optional[OpenAI]:
     if not state.openai_api_key:
