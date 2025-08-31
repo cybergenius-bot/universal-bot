@@ -6,7 +6,6 @@ logger = logging.getLogger("serve")
 
 app = None
 errors = []
-
 for mod in ["bot", "main.bot", "src.bot", "app.bot"]:
     try:
         m = import_module(mod)
@@ -20,7 +19,6 @@ if app is None:
     logger.error("serve.py: failed to import bot:app. Tried: %s", "; ".join(errors))
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse
-
     app = FastAPI(title="fallback-serve")
 
     @app.get("/health/live")
