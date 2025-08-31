@@ -3,7 +3,8 @@ FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app:/app/main:/app/src
 
 WORKDIR /app
 
@@ -18,7 +19,7 @@ RUN pip install --upgrade pip && \
 COPY . /app
 
 # Ensure LF endings and executable bit for entrypoint
-RUN sed -i 's/\r$//' /app/entrypoint.sh && \
+RUN sed -i 's/\r$//' /app/entrypoint.sh || true && \
     cp /app/entrypoint.sh /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
