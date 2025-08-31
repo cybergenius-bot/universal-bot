@@ -23,7 +23,7 @@ RUN sed -i 's/\r$//' /app/entrypoint.sh || true && \
     cp /app/entrypoint.sh /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 
-# Catch syntax errors during build
+# Catch syntax errors at build time
 RUN python -c 'import compileall,sys; sys.exit(0 if compileall.compile_dir("/app", force=True, quiet=1) else 1)'
 
 EXPOSE 8080
