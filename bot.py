@@ -1,5 +1,6 @@
 import os
 import json
+import hmac
 import asyncio
 import logging
 import tempfile
@@ -60,26 +61,24 @@ async def health_diag():
         "webhook_url": state.webhook_url or None,
     })
 
-# Admin endpoint to (re)install webhook after start
 @app.post("/admin/set_webhook")
-async def admin_set_webhook(
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-):
+async def admin_set_webhook(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
     if not state.admin_token or x_admin_token != state.admin_token:
         raise HTTPException(status_code=403, detail="Forbidden")
     if not state.application or not state.public_base_url:
         raise HTTPException(status_code=503, detail="App not initialized or no PUBLIC_BASE_URL")
-    webhook_url = state.public_base_url.rstrip("/") + "/telegram"
+    url = state.public_base_url.rstrip("/") + "/telegram"
     try:
         ok = await state.application.bot.set_webhook(
-            url=webhook_url,
+            url=url,
             secret_token=state.webhook_secret,
             drop_pending_updates=True
         )
-        state.webhook_url = webhook_url
-        return JSONResponse({"ok": bool(ok), "url": webhook_url})
+        state.webhook_url = url
+        logger.info("Admin set_webhook ok=%s url=%s", ok, url)
+        return JSONResponse({"ok": bool(ok), "url": url})
     except TelegramError as e:
-        logger.exception("admin set_webhook failed: %s", e)
+        logger.exception("Admin set_webhook failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/telegram")
@@ -87,31 +86,45 @@ async def telegram_webhook(
     request: Request,
     x_telegram_bot_api_secret_token: Optional[str] = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
 ):
-    if state.mode != "webhook":
-        raise HTTPException(status_code=503, detail="Webhook is not enabled")
-    if state.application is None or state.application.bot is None:
-        raise HTTPException(status_code=503, detail="Application not initialized")
-
-    expected = state.webhook_secret
-    if expected and x_telegram_bot_api_secret_token != expected:
-        logger.warning("Webhook: secret token mismatch")
-        raise HTTPException(status_code=403, detail="Forbidden")
-    elif not expected:
-        logger.warning("Webhook: TELEGRAM_WEBHOOK_SECRET is not set - secret check disabled")
-
     try:
-        data = await request.json()
-    except Exception:
-        data = json.loads((await request.body()).decode("utf-8") or "{}")
+        if state.mode != "webhook":
+            raise HTTPException(status_code=503, detail="Webhook is not enabled")
+        if state.application is None or state.application.bot is None:
+            raise HTTPException(status_code=503, detail="Application not initialized")
 
-    try:
-        update = Update.de_json(data, state.application.bot)
+        expected = (state.webhook_secret or "").strip()
+        got = (x_telegram_bot_api_secret_token or "").strip()
+        if expected:
+            if not hmac.compare_digest(got, expected):
+                logger.warning("Webhook: secret token mismatch (len got=%s, len expected=%s)", len(got), len(expected))
+                raise HTTPException(status_code=403, detail="Forbidden")
+        else:
+            logger.warning("Webhook: TELEGRAM_WEBHOOK_SECRET is not set - secret check disabled")
+
+        # читаем тело
+        try:
+            data = await request.json()
+        except Exception:
+            data = json.loads((await request.body()).decode("utf-8") or "{}")
+
+        # парсим Update
+        try:
+            update = Update.de_json(data, state.application.bot)
+        except Exception as e:
+            logger.exception("Update parse error: %s", e)
+            raise HTTPException(status_code=400, detail="Bad update payload")
+
+        # фоновая обработка
+        asyncio.create_task(state.application.process_update(update))
+        return JSONResponse({"ok": True})
+
+    except HTTPException as he:
+        # отдаём как есть
+        raise he
     except Exception as e:
-        logger.exception("Update parse error: %s", e)
-        raise HTTPException(status_code=400, detail="Bad update payload")
-
-    asyncio.create_task(state.application.process_update(update))
-    return JSONResponse({"ok": True})
+        # на всякий случай, чтобы не было 500 без объяснений
+        logger.exception("Webhook handler failed: %s", e)
+        return JSONResponse({"ok": False, "error": "internal"}, status_code=500)
 
 @app.on_event("startup")
 async def on_startup():
@@ -140,7 +153,6 @@ async def initialize_bot():
 
     application = Application.builder().token(state.telegram_token).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", on_cmd_start))
     application.add_handler(CommandHandler("help", on_cmd_help))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
@@ -149,27 +161,23 @@ async def initialize_bot():
     application.add_handler(MessageHandler(filters.PHOTO, on_photo))
     application.add_handler(MessageHandler(filters.VIDEO, on_video))
 
-    # Initialize PTB internals
     await application.initialize()
 
-    # Сохраняем ссылку РАНЬШЕ, чтобы /telegram перестал отдавать 503 даже при неудачном вебхуке
+    # сохраняем ссылку ДО установки вебхука → /telegram перестаёт отвечать 503
     state.application = application
 
-    # Пытаемся поставить вебхук, но не падаем, если не вышло — логируем причину
     if state.mode == "webhook" and state.public_base_url:
-        webhook_url = state.public_base_url.rstrip("/") + "/telegram"
-        state.webhook_url = webhook_url
+        state.webhook_url = state.public_base_url.rstrip("/") + "/telegram"
         try:
             ok = await application.bot.set_webhook(
-                url=webhook_url,
+                url=state.webhook_url,
                 secret_token=state.webhook_secret,
                 drop_pending_updates=True
             )
-            logger.info("Webhook set: %s (ok=%s)", webhook_url, ok)
+            logger.info("Webhook set: %s (ok=%s)", state.webhook_url, ok)
         except TelegramError as e:
             logger.exception("set_webhook failed: %s", e)
 
-    # Start PTB subsystems (JobQueue, etc.)
     await application.start()
 
 def get_openai_client() -> Optional[OpenAI]:
