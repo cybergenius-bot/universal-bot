@@ -17,6 +17,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# Больше подробностей по библиотеке Telegram
+logging.getLogger("telegram").setLevel(logging.DEBUG)
+
 logger = logging.getLogger("bot")
 
 app = FastAPI(title="universal-telegram-bot")
@@ -30,6 +33,7 @@ class State:
         self.webhook_url: Optional[str] = None
         self.public_base_url: Optional[str] = os.getenv("PUBLIC_BASE_URL")
         self.webhook_secret: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+        # ВАЖНО: переменная должна называться именно TELEGRAM_BOT_TOKEN
         self.telegram_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
         self.openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
         self.model_text: str = os.getenv("OPENAI_MODEL_TEXT", "gpt-4o-mini")
@@ -37,6 +41,12 @@ class State:
 
 
 state = State()
+
+
+# Простая корневая проверка
+@app.get("/")
+async def root():
+    return JSONResponse({"service": "telegram-bot", "status": "ok"})
 
 
 @app.get("/health/live")
@@ -50,6 +60,19 @@ async def health_ready():
         return JSONResponse({"status": "ready"})
     else:
         return JSONResponse({"status": "starting"})
+
+
+# Диагностика окружения и статуса
+@app.get("/health/diag")
+async def health_diag():
+    return JSONResponse({
+        "mode": state.mode,
+        "ready": state.ready,
+        "has_token": bool(state.telegram_token),
+        "has_base_url": bool(state.public_base_url),
+        "has_secret": bool(state.webhook_secret),
+        "webhook_url": state.webhook_url or None,
+    })
 
 
 @app.post("/telegram")
@@ -102,6 +125,15 @@ async def _background_init():
 
 
 async def initialize_bot():
+    # Диагностика окружения (без раскрытия секретов)
+    logger.info(
+        "Init: mode=%s, token=%s, base_url=%s, secret=%s",
+        state.mode,
+        "set" if state.telegram_token else "missing",
+        state.public_base_url or "<none>",
+        "set" if state.webhook_secret else "missing",
+    )
+
     if not state.telegram_token:
         logger.warning("TELEGRAM_BOT_TOKEN is not set - bot will not be initialized")
         return
@@ -124,11 +156,15 @@ async def initialize_bot():
         else:
             webhook_url = state.public_base_url.rstrip("/") + "/telegram"
             state.webhook_url = webhook_url
-            await application.bot.set_webhook(url=webhook_url, secret_token=state.webhook_secret)
+            # Сбрасываем накопленные апдейты и ставим секрет
+            await application.bot.set_webhook(
+                url=webhook_url,
+                secret_token=state.webhook_secret,
+                drop_pending_updates=True
+            )
             logger.info("Webhook set: %s", webhook_url)
 
     await application.start()
-
     state.application = application
 
 
