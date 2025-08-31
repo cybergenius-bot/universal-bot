@@ -47,10 +47,7 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
-    if state.ready and state.application is not None:
-        return JSONResponse({"status": "ready"})
-    else:
-        return JSONResponse({"status": "starting"})
+    return JSONResponse({"status": "ready" if (state.ready and state.application) else "starting"})
 
 @app.get("/health/diag")
 async def health_diag():
@@ -74,11 +71,10 @@ async def telegram_webhook(
         raise HTTPException(status_code=503, detail="Application not initialized")
 
     expected = state.webhook_secret
-    if expected:
-        if x_telegram_bot_api_secret_token != expected:
-            logger.warning("Webhook: secret token mismatch")
-            raise HTTPException(status_code=403, detail="Forbidden")
-    else:
+    if expected and x_telegram_bot_api_secret_token != expected:
+        logger.warning("Webhook: secret token mismatch")
+        raise HTTPException(status_code=403, detail="Forbidden")
+    elif not expected:
         logger.warning("Webhook: TELEGRAM_WEBHOOK_SECRET is not set - secret check disabled")
 
     try:
@@ -160,11 +156,7 @@ async def on_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(
-        "Available:\n"
-        "- Text: analysis, summaries, Stories.\n"
-        "- Voice/Audio: Whisper transcription.\n"
-        "- Photo/Video: basic analysis.\n"
-        "Running in webhook mode; use polling only for local debugging."
+        "Available:\n- Text: analysis, summaries, Stories.\n- Voice/Audio: Whisper transcription.\n- Photo/Video: basic analysis.\nRunning in webhook mode; use polling only for local debugging."
     )
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
