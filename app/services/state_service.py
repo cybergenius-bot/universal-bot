@@ -1,57 +1,32 @@
-import json
-from enum import Enum
-from typing import Any, Dict, Optional
-import redis.asyncio as redis
-from ..config import settings
+import logging
+from importlib import import_module
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("serve")
 
-class UserState(Enum):
-    """Состояния пользователя"""
-    IDLE = "idle"
-    WAITING_NAME = "waiting_name"
-    WAITING_EMAIL = "waiting_email"
-    WAITING_MESSAGE = "waiting_message"
-    IN_MENU = "in_menu"
-    IN_SUPPORT = "in_support"
+app = None
+errors = []
 
+for mod in ["bot", "main.bot", "src.bot", "app.bot"]:
+    try:
+        m = import_module(mod)
+        app = getattr(m, "app")
+        logger.info("serve.py: import %s:app - OK", mod)
+        break
+    except Exception as e:
+        errors.append(f"{mod}: {e}")
 
-class StateService:
-    """Сервис для управления состояниями пользователей"""
-    
-    def __init__(self):
-        self.redis = redis.from_url(settings.redis_url)
-    
-    async def set_state(self, user_id: int, state: UserState, data: Optional[Dict[str, Any]] = None):
-        """Установить состояние пользователя"""
-        key = f"user_state:{user_id}"
-        value = {
-            "state": state.value,
-            "data": data or {},
-            "timestamp": int(time.time())
-        }
-        await self.redis.set(key, json.dumps(value), ex=3600)  # Expire in 1 hour
-    
-    async def get_state(self, user_id: int) -> tuple[UserState, Dict[str, Any]]:
-        """Получить состояние пользователя"""
-        key = f"user_state:{user_id}"
-        value = await self.redis.get(key)
-        
-        if not value:
-            return UserState.IDLE, {}
-        
-        data = json.loads(value)
-        state = UserState(data.get("state", "idle"))
-        return state, data.get("data", {})
-    
-    async def clear_state(self, user_id: int):
-        """Очистить состояние пользователя"""
-        key = f"user_state:{user_id}"
-        await self.redis.delete(key)
-    
-    async def close(self):
-        """Закрыть соединение с Redis"""
-        await self.redis.close()
+if app is None:
+    logger.error("serve.py: failed to import bot:app. Tried: %s", "; ".join(errors))
+    from fastapi import FastAPI
+    from fastapi.responses import JSONResponse
 
+    app = FastAPI(title="fallback-serve")
 
-# Глобальный объект сервиса состояний
-state_service = StateService()
+    @app.get("/health/live")
+    async def health_live():
+        return JSONResponse({"status": "ok"})
+
+    @app.get("/health/ready")
+    async def health_ready():
+        return JSONResponse({"status": "starting", "import_bot_app": False, "errors": errors})
