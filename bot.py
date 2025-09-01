@@ -1,365 +1,266 @@
-import os
-import json
-import hmac
-import asyncio
-import logging
-import tempfile
-from typing import Optional
+from fastapi import FastAPI, Request, Response
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, Update,
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    FSInputFile
+)
+from gtts import gTTS
+import asyncio, os, re, tempfile, time, subprocess
 
-from fastapi import FastAPI, Request, Header, HTTPException
-from fastapi.responses import JSONResponse
+# -------- Конфигурация --------
+TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
+SECRET = os.getenv("WEBHOOK_SECRET", "railway123")  # должен совпасть с URL
+BASE   = os.getenv("BASE_URL", "")                  # напр.: https://universal-bot-production.up.railway.app
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")
 
-from telegram import Update
-from telegram.error import TelegramError
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+bot = Bot(TOKEN)
+dp  = Dispatcher()
+app = FastAPI()
 
-from openai import OpenAI
+# -------- Память пользователя (в проде — БД/Redis) --------
+ui_lang: dict[int,str] = {}
+last_content_langs: dict[int,list[str]] = {}
+content_lang: dict[int,str] = {}
 
-# Base logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-# More verbose logs from python-telegram-bot while отладка
-logging.getLogger("telegram").setLevel(logging.DEBUG)
+# -------- Локализация интерфейса (фиксируется пользователем) --------
+def t_ui(lang: str = "ru"):
+    data = {
+        "ru": dict(
+            ready="Готов. Выберите действие:",
+            say="Дай голосом",
+            show_tr="Показать расшифровку",
+            lang="Сменить язык",
+            mode="Режим ответа",
+            lang_choose="Выберите язык интерфейса:",
+            lang_saved="Язык интерфейса сохранён.",
+            tts_caption="Озвучено",
+            demo_text="Краткое резюме: понял запрос. Детали: отвечаю по сути. Чек‑лист: всё ок.",
+        ),
+        "en": dict(
+            ready="Ready. Choose an action:",
+            say="Speak it",
+            show_tr="Show transcript",
+            lang="Change language",
+            mode="Reply mode",
+            lang_choose="Choose interface language:",
+            lang_saved="Interface language saved.",
+            tts_caption="Voiced",
+            demo_text="Summary: got it. Details: responding to your point. Checklist: all good.",
+        ),
+        "he": dict(
+            ready="מוכן. בחרו פעולה:",
+            say="השמע בקול",
+            show_tr="הצג תמלול",
+            lang="החלפת שפה",
+            mode="מצב תגובה",
+            lang_choose="בחרו שפת ממשק:",
+            lang_saved="שפת הממשק נשמרה.",
+            tts_caption="הוקרא",
+            demo_text="תקציר: קיבלתי. פרטים: מגיב עניינית. צ׳ק‑ליסט: אפשר להמשיך.",
+        ),
+    }
+    return data.get(lang, data["ru"])
 
-logger = logging.getLogger("bot")
-app = FastAPI(title="universal-telegram-bot")
+def main_kb(lang: str = "ru"):
+    t = t_ui(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=t["say"]), KeyboardButton(text=t["show_tr"])],
+            [KeyboardButton(text=t["lang"]), KeyboardButton(text=t["mode"])],
+        ],
+        resize_keyboard=True
+    )
 
+# -------- Детект языка контента (с «гистерезисом») --------
+rx = {
+    "ru": re.compile(r"[А-Яа-яЁё]"),
+    "he": re.compile(r"[א-ת]"),
+    "ar": re.compile(r"[\u0600-\u06FF]"),
+    "ja": re.compile(r"[\u3040-\u30FF\u4E00-\u9FFF]"),
+    "ko": re.compile(r"[\uAC00-\uD7AF]"),
+    "zh": re.compile(r"[\u4E00-\u9FFF]"),
+    "en": re.compile(r"[A-Za-z]"),
+}
 
-class State:
-    def __init__(self) -> None:
-        self.ready: bool = False
-        self.mode: str = os.getenv("MODE", "webhook")
-        self.application: Optional[Application] = None
-        self.webhook_url: Optional[str] = None
-        self.public_base_url: Optional[str] = os.getenv("PUBLIC_BASE_URL")
-        self.webhook_secret: Optional[str] = os.getenv("TELEGRAM_WEBHOOK_SECRET")
-        self.telegram_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
-        self.admin_token: Optional[str] = os.getenv("ADMIN_TOKEN")
-        self.model_text: str = os.getenv("OPENAI_MODEL_TEXT", "gpt-4o-mini")
-        self.model_whisper: str = os.getenv("OPENAI_MODEL_WHISPER", "whisper-1")
-        # 'auto' — отвечать на языке пользователя; 'ru' или 'en' — форсировать язык ответа
-        self.reply_lang: str = os.getenv("REPLY_LANG", "auto").lower()
+def detect_script_lang(text: str) -> str | None:
+    for code, pat in rx.items():
+        if pat.search(text or ""):
+            return code
+    return None
 
+def update_content_lang(user_id: int, candidate: str) -> str:
+    arr = last_content_langs.get(user_id, [])
+    arr.append(candidate)
+    if len(arr) > 3:
+        arr.pop(0)
+    last_content_langs[user_id] = arr
+    counts: dict[str,int] = {}
+    for c in arr:
+        counts[c] = counts.get(c, 0) + 1
+    best, mx = None, 0
+    for k, v in counts.items():
+        if v > mx:
+            best, mx = k, v
+    if mx >= 2:
+        content_lang[user_id] = best
+    return content_lang.get(user_id, candidate)
 
-state = State()
+# -------- TTS: OGG/Opus, при отсутствии ffmpeg — MP3 --------
+def tts_make(text: str, lang: str):
+    tmp = tempfile.gettempdir()
+    mp3 = os.path.join(tmp, f"{int(time.time()*1000)}.mp3")
+    ogg = os.path.join(tmp, f"{int(time.time()*1000)+1}.ogg")
 
+    tries = ["en","ru"]
+    if lang == "he":
+        tries = ["he", "iw"] + tries
+    elif lang == "zh":
+        tries = ["zh-CN", "zh-TW"] + tries
+    else:
+        tries = [lang] + tries
 
-def detect_lang(text: str) -> str:
-    # Простая эвристика: если есть кириллица, считаем русский
-    for ch in text:
-        if "\u0400" <= ch <= "\u04FF":
-            return "ru"
-    return "en"
+    last_err = None
+    for L in tries:
+        try:
+            gTTS(text=text, lang=L).save(mp3)
+            try:
+                subprocess.run(
+                    ["ffmpeg","-y","-i",mp3,"-c:a","libopus","-b:a","48k","-ac","1","-ar","48000",ogg],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                return ("voice", ogg, mp3)   # ok: OGG/Opus
+            except Exception:
+                return ("audio", mp3, mp3)   # fallback: MP3
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or RuntimeError("TTS failed")
 
+# -------- Хендлеры --------
+@dp.message(Command("start"))
+async def on_start(m: Message):
+    uid = m.from_user.id
+    if uid not in ui_lang:
+        ui_lang[uid] = "ru"
+    L = ui_lang[uid]
+    await m.answer(t_ui(L)["ready"], reply_markup=main_kb(L))
 
-# --------- Health/Root ---------
-@app.get("/")
-async def root():
-    return JSONResponse({"service": "telegram-bot", "status": "ok"})
+@dp.message(F.text)
+async def on_text(m: Message):
+    uid = m.from_user.id
+    if uid not in ui_lang:
+        ui_lang[uid] = "ru"
+    L_ui = ui_lang[uid]
+    t = t_ui(L_ui)
+    txt = (m.text or "").strip()
 
+    # Кнопка «Сменить язык»
+    if txt in (t_ui("ru")["lang"], t_ui("en")["lang"], t_ui("he")["lang"]):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Русский", callback_data="ui_ru"),
+             InlineKeyboardButton(text="English", callback_data="ui_en")],
+            [InlineKeyboardButton(text="עברית", callback_data="ui_he")]
+        ])
+        await m.answer(t["lang_choose"], reply_markup=kb)
+        return
 
-@app.get("/health/live")
-async def health_live():
-    return JSONResponse({"status": "ok"})
-
-
-@app.get("/health/ready")
-async def health_ready():
-    return JSONResponse({"status": "ready" if (state.ready and state.application) else "starting"})
-
-
-@app.get("/health/diag")
-async def health_diag():
-    return JSONResponse({
-        "mode": state.mode,
-        "ready": state.ready,
-        "app_inited": bool(state.application),
-        "has_token": bool(state.telegram_token),
-        "has_base_url": bool(state.public_base_url),
-        "has_secret": bool(state.webhook_secret),
-        "webhook_url": state.webhook_url or None,
-        "reply_lang": state.reply_lang,
-    })
-
-
-# --------- Admin: set webhook on demand ---------
-@app.post("/admin/set_webhook")
-async def admin_set_webhook(x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token")):
-    if not state.admin_token or x_admin_token != state.admin_token:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    if not state.application or not state.public_base_url:
-        raise HTTPException(status_code=503, detail="App not initialized or no PUBLIC_BASE_URL")
-    url = state.public_base_url.rstrip("/") + "/telegram"
-    try:
-        ok = await state.application.bot.set_webhook(
-            url=url,
-            secret_token=state.webhook_secret,
-            drop_pending_updates=True
-        )
-        state.webhook_url = url
-        logger.info("Admin set_webhook ok=%s url=%s", ok, url)
-        return JSONResponse({"ok": bool(ok), "url": url})
-    except TelegramError as e:
-        logger.exception("Admin set_webhook failed: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# --------- Telegram webhook ---------
-@app.post("/telegram")
-async def telegram_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: Optional[str] = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
-):
-    # Гарантируем корректные статусы вместо немого 500
-    try:
-        if state.mode != "webhook":
-            raise HTTPException(status_code=503, detail="Webhook is not enabled")
-        if state.application is None or state.application.bot is None:
-            raise HTTPException(status_code=503, detail="Application not initialized")
-
-        expected = (state.webhook_secret or "").strip()
-        got = (x_telegram_bot_api_secret_token or "").strip()
-        if expected:
-            if not hmac.compare_digest(got, expected):
-                logger.warning("Webhook: secret token mismatch (len got=%s, len expected=%s)", len(got), len(expected))
-                raise HTTPException(status_code=403, detail="Forbidden")
+    # «Дай голосом»
+    if txt in (t_ui("ru")["say"], t_ui("en")["say"], t_ui("he")["say"]):
+        Lc = content_lang.get(uid, "ru")
+        demo = {
+            "ru": "Озвучка: Сохраняйте спокойствие и продолжайте. Это демо‑голос.",
+            "en": "Voice: Keep calm and carry on. This is a demo voice.",
+            "he": "קול: שמרו על קור רוח והמשיכו. זה קול הדגמה.",
+            "ja": "音声: 落ち着いて、前に進みましょう。これはデモ音声です。",
+            "ar": "صوت: تحلَّ بالهدوء وواصل. هذا صوت تجريبي."
+        }
+        kind, path, mp3 = tts_make(demo.get(Lc, demo["ru"]), Lc)
+        if kind == "voice":
+            await m.answer_voice(voice=FSInputFile(path), caption=t_ui(L_ui)["tts_caption"])
         else:
-            logger.warning("Webhook: TELEGRAM_WEBHOOK_SECRET is not set - secret check disabled")
+            await m.answer_audio(audio=FSInputFile(path), caption=t_ui(L_ui)["tts_caption"])
+        return
 
-        raw = await request.body()
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except Exception as e:
-            logger.warning("Bad JSON body for /telegram: %r (err=%s)", raw[:200], e)
-            return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
+    # Обычный текст → автоязык контента (стабильный)
+    candidate = detect_script_lang(txt) or "en"
+    if candidate == "en" and len(txt) < 12:
+        candidate = content_lang.get(uid, "ru")
+    stable = update_content_lang(uid, candidate)
 
-        try:
-            update = Update.de_json(data, state.application.bot)
-        except Exception as e:
-            logger.warning("Update parse error: %s; body=%r", e, raw[:200])
-            return JSONResponse({"ok": False, "error": "bad_update"}, status_code=400)
+    replies = {
+        "ru": "Краткое резюме: понял запрос. Детали: отвечаю по‑русски. Чек‑лист: всё ок.",
+        "en": "Summary: got your request. Details: replying in English. Checklist: all good.",
+        "he": "תקציר: קיבלתי. פרטים: עונה בעברית. צ׳ק‑ליסט: הכל בסדר.",
+        "ja": "要約: 了解しました。詳細: 日本語で回答します。チェック: OKです。",
+        "ar": "ملخص: تم الاستلام. التفاصيل: سأرد بالعربية. قائمة التحقق: تمام.",
+    }
+    await m.answer(replies.get(stable, replies["ru"]), reply_markup=main_kb(L_ui))
 
-        # Возвращаем 200 сразу, обработку делаем в фоне
-        asyncio.create_task(state.application.process_update(update))
-        return JSONResponse({"ok": True})
+@dp.callback_query(F.data.in_({"ui_ru","ui_en","ui_he"}))
+async def on_ui_change(cq):
+    mapping = {"ui_ru":"ru", "ui_en":"en", "ui_he":"he"}
+    newL = mapping.get(cq.data, "ru")
+    ui_lang[cq.from_user.id] = newL
+    await cq.answer(t_ui(newL)["lang_saved"], show_alert=False)
+    await cq.message.edit_text(t_ui(newL)["lang_saved"])
+    await bot.send_message(cq.message.chat.id, t_ui(newL)["ready"], reply_markup=main_kb(newL))
 
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.exception("Webhook handler failed: %s", e)
-        return JSONResponse({"ok": False, "error": "internal"}, status_code=500)
+@dp.message(F.voice)
+async def on_voice(m: Message):
+    uid = m.from_user.id
+    if uid not in ui_lang:
+        ui_lang[uid] = "ru"
+    L_ui = ui_lang[uid]
+    Lc = content_lang.get(uid, L_ui)
 
+    text = {
+        "ru": "Краткое резюме: запрос принят. Детали: отвечаю по сути без повтора. Чек‑лист: уточним цель и следующий шаг.",
+        "en": "Summary: received. Details: answering to the point, no echo. Checklist: clarify goal and next step.",
+        "he": "תקציר: התקבל. פרטים: תשובה עניינית ללא חזרה. צ׳ק‑ליסט: נחדד מטרה וצעד הבא."
+    }.get(Lc, "Summary: received. I will answer to the point.")
 
-# --------- Startup / Initialization ---------
+    await m.answer(text)
+    try:
+        kind, path, mp3 = tts_make(text, Lc)
+        if kind == "voice":
+            await m.answer_voice(voice=FSInputFile(path), caption=t_ui(L_ui)["tts_caption"])
+        else:
+            await m.answer_audio(audio=FSInputFile(path), caption=t_ui(L_ui)["tts_caption"])
+    except Exception:
+        pass
+
+# -------- FastAPI: healthcheck и вебхук --------
+@app.get("/")
+async def root_ok():
+    return Response(content="OK", media_type="text/plain")
+
+@app.get(f"/telegram/{SECRET}")
+async def webhook_ok():
+    return Response(content="Webhook OK", media_type="text/plain")
+
+@app.post(f"/telegram/{SECRET}")
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    try:
+        update = Update.model_validate(data)
+    except Exception:
+        return Response(status_code=200)
+    await dp.feed_update(bot=bot, update=update)
+    return Response(status_code=200)
+
 @app.on_event("startup")
 async def on_startup():
-    asyncio.create_task(_background_init())
-
-
-async def _background_init():
-    try:
-        await initialize_bot()
-        state.ready = True
-        logger.info("Initialization complete, ready")
-    except Exception as e:
-        state.ready = False
-        logger.exception("Initialization failed: %s", e)
-
-
-async def initialize_bot():
-    logger.info(
-        "Init: mode=%s, token=%s, base_url=%s, secret=%s, reply_lang=%s",
-        state.mode,
-        "set" if state.telegram_token else "missing",
-        state.public_base_url or "<none>",
-        "set" if state.webhook_secret else "missing",
-        state.reply_lang,
-    )
-    if not state.telegram_token:
-        logger.warning("TELEGRAM_BOT_TOKEN is not set - bot will not be initialized")
-        return
-
-    application = Application.builder().token(state.telegram_token).build()
-
-    # Handlers
-    application.add_handler(CommandHandler("start", on_cmd_start))
-    application.add_handler(CommandHandler("help", on_cmd_help))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    application.add_handler(MessageHandler(filters.VOICE, on_voice))
-    application.add_handler(MessageHandler(filters.AUDIO, on_audio))
-    application.add_handler(MessageHandler(filters.PHOTO, on_photo))
-    application.add_handler(MessageHandler(filters.VIDEO, on_video))
-
-    # Init PTB internals
-    await application.initialize()
-
-    # Ключевой момент: сохраняем ссылку ДО установки вебхука → /telegram перестаёт отдавать 503
-    state.application = application
-
-    # Ставим вебхук (не падаем при ошибке — логируем)
-    if state.mode == "webhook" and state.public_base_url:
-        state.webhook_url = state.public_base_url.rstrip("/") + "/telegram"
+    if BASE:
         try:
-            ok = await application.bot.set_webhook(
-                url=state.webhook_url,
-                secret_token=state.webhook_secret,
-                drop_pending_updates=True
-            )
-            logger.info("Webhook set: %s (ok=%s)", state.webhook_url, ok)
-        except TelegramError as e:
-            logger.exception("set_webhook failed: %s", e)
+            await bot.set_webhook(f"{BASE}/telegram/{SECRET}")
+        except Exception as e:
+            print("set_webhook error:", e)
 
-    # Start PTB subsystems (JobQueue etc.)
-    await application.start()
-
-
-# --------- OpenAI ---------
-def get_openai_client() -> Optional[OpenAI]:
-    if not state.openai_api_key:
-        logger.warning("OPENAI_API_KEY is not set - AI features disabled")
-        return None
-    return OpenAI(api_key=state.openai_api_key)
-
-
-# --------- Handlers ---------
-async def on_cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        "Привет! Я универсальный бот: понимаю текст, голос/аудио (Whisper), фото/видео (базовый анализ) и делаю структурированные ответы/Stories."
-    )
-
-
-async def on_cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        "Доступно:\n"
-        "- Текст: анализ, резюме, Stories.\n"
-        "- Голос/Аудио: распознаю через Whisper.\n"
-        "- Фото/Видео: базовый анализ.\n"
-        "Работаю в режиме webhook; polling используйте только для локальной отладки."
-    )
-
-
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.effective_message.text or ""
-    client = get_openai_client()
-    if not client:
-        await update.effective_message.reply_text("Получил текст, но ИИ недоступен (нет OPENAI_API_KEY).")
-        return
-
-    # Определяем язык ответа: REPLY_LANG=ru|en|auto
-    lang = state.reply_lang if state.reply_lang in ("ru", "en") else detect_lang(text)
-    if lang == "ru":
-        system_msg = "Ты — помощник. Отвечай кратко, структурировано и всегда на русском языке."
-        user_msg = f"Сформируй краткое структурированное объяснение/Story по теме:\n{text}"
-        fallback = "Готово."
-        err = "Не удалось сгенерировать ответ."
-    else:
-        system_msg = "You are a helpful assistant. Reply concisely, structured, in English."
-        user_msg = f"Create a short, structured explanation/Story on:\n{text}"
-        fallback = "Done."
-        err = "Failed to generate an answer."
-
-    try:
-        completion = client.chat.completions.create(
-            model=state.model_text,
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.4,
-        )
-        reply = completion.choices[0].message.content or fallback
-    except Exception as e:
-        logger.exception("Generation error: %s", e)
-        reply = err
-
-    for chunk in split_long_message(reply):
-        await update.effective_message.reply_text(chunk)
-
-
-async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_message or not update.effective_message.voice:
-        return
-    client = get_openai_client()
-    if not client:
-        await update.effective_message.reply_text("ИИ для распознавания недоступен (нет OPENAI_API_KEY).")
-        return
-
-    voice = update.effective_message.voice
-    file = await voice.get_file()
-    with tempfile.TemporaryDirectory() as td:
-        ogg_path = os.path.join(td, "audio.ogg")
-        wav_path = os.path.join(td, "audio.wav")
-        await file.download_to_drive(ogg_path)
-        await ffmpeg_to_wav(ogg_path, wav_path)
-
-        text = await whisper_transcribe(client, wav_path)
-        await update.effective_message.reply_text(f"Распознанный текст:\n{text}")
-
-
-async def on_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_message or not update.effective_message.audio:
-        return
-    client = get_openai_client()
-    if not client:
-        await update.effective_message.reply_text("ИИ для распознавания недоступен (нет OPENAI_API_KEY).")
-        return
-
-    audio = update.effective_message.audio
-    file = await audio.get_file()
-    with tempfile.TemporaryDirectory() as td:
-        in_path = os.path.join(td, "audio_input")
-        wav_path = os.path.join(td, "audio.wav")
-        await file.download_to_drive(in_path)
-        await ffmpeg_to_wav(in_path, wav_path)
-
-        text = await whisper_transcribe(client, wav_path)
-        await update.effective_message.reply_text(f"Распознанный текст:\n{text}")
-
-
-async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_message or not update.effective_message.photo:
-        return
-    client = get_openai_client()
-    if not client:
-        await update.effective_message.reply_text("ИИ для анализа изображений недоступен (нет OPENAI_API_KEY).")
-        return
-    await update.effective_message.reply_text("Фото получено. Базовый анализ изображений включён.")
-
-
-async def on_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("Видео получено. Извлечение ключевых кадров и анализ — в базовом режиме.")
-
-
-# --------- Utils ---------
-def split_long_message(text: str, limit: int = 3500):
-    out, buf, size = [], [], 0
-    for line in text.splitlines(True):
-        if size + len(line) > limit and buf:
-            out.append("".join(buf)); buf = [line]; size = len(line)
-        else:
-            buf.append(line); size += len(line)
-    if buf: out.append("".join(buf))
-    return out or [text]
-
-
-async def ffmpeg_to_wav(src_path: str, dst_path: str):
-    cmd = ["ffmpeg", "-y", "-i", src_path, "-ar", "16000", "-ac", "1", "-f", "wav", dst_path]
-    logger.info("FFmpeg: %s", " ".join(cmd))
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
-    rc = await proc.wait()
-    if rc != 0:
-        raise RuntimeError(f"ffmpeg exited with code {rc}")
-
-
-async def whisper_transcribe(client: OpenAI, wav_path: str) -> str:
-    try:
-        with open(wav_path, "rb") as f:
-            result = client.audio.transcriptions.create(model=state.model_whisper, file=f)
-        return getattr(result, "text", None) or str(result)
-    except Exception as e:
-        logger.exception("Whisper error: %s", e)
-        return "Не удалось распознать аудио."
+# -------- Локальный запуск (необязательно) --------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("bot:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
