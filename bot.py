@@ -1,3 +1,4 @@
+# ANTI-ECHO v2025-09-02 — голос не повторяется, расшифровка только по кнопке
 from fastapi import FastAPI, Request, Response
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -9,12 +10,12 @@ from aiogram.types import (
 )
 from gtts import gTTS
 import imageio_ffmpeg
-import os, re, tempfile, time, subprocess, uuid
+import os, re, tempfile, time, subprocess
 
 # ------------------- Конфигурация -------------------
 TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
-SECRET = os.getenv("WEBHOOK_SECRET", "railway123")   # должен совпасть с URL
-BASE   = os.getenv("BASE_URL", "")                   # напр.: https://universal-bot-production.up.railway.app
+SECRET = os.getenv("WEBHOOK_SECRET", "railway123")      # должен совпасть с URL
+BASE   = os.getenv("BASE_URL", "")                      # напр.: https://universal-bot-production.up.railway.app
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")
 
@@ -23,13 +24,15 @@ dp  = Dispatcher()
 app = FastAPI()
 
 # ------------------- Профиль пользователя (in‑mem) -------------------
-ui_lang: dict[int, str] = {}               # язык интерфейса (ru|en|he), фиксируем вручную
-reply_mode: dict[int, str] = {}            # 'short' | 'expanded' | 'deep' (по умолчанию 'expanded')
-last_content_langs: dict[int, list[str]] = {}
+ui_lang: dict[int, str] = {}                # язык интерфейса
+reply_mode: dict[int, str] = {}             # 'short'|'expanded'|'deep'
+last_content_langs: dict[int, list[str]] = {}  # последние 3 детекции языка контента
 content_lang: dict[int, str] = {}
-_asr_store: dict[int, str] = {}            # храним расшифровку только для показа по кнопке
+_asr_store: dict[int, str] = {}             # последняя расшифровка (по кнопке)
+_last_voice_at: dict[int, float] = {}       # время последнего войса
+_last_asr_text: dict[int, str] = {}         # текст той же расшифровки (для ловли «скрытого эха»)
 
-# ------------------- Локализация интерфейса -------------------
+# ------------------- Локализация -------------------
 def t_ui(lang: str = "ru"):
     data = {
         "ru": dict(
@@ -93,15 +96,12 @@ def main_kb(lang: str = "ru"):
         resize_keyboard=True
     )
 
-# ------------------- Детект языка контента (со стабилизацией) -------------------
+# ------------------- Язык контента: детект + стабилизация -------------------
 rx = {
-    "ru": re.compile(r"[А-Яа-яЁё]"),
-    "he": re.compile(r"[א-ת]"),
-    "ar": re.compile(r"[\u0600-\u06FF]"),
-    "ja": re.compile(r"[\u3040-\u30FF\u4E00-\u9FFF]"),
-    "ko": re.compile(r"[\uAC00-\uD7AF]"),
-    "zh": re.compile(r"[\u4E00-\u9FFF]"),
-    "en": re.compile(r"[A-Za-z]"),
+    "ru": re.compile(r"[А-Яа-яЁё]"), "he": re.compile(r"[א-ת]"),
+    "ar": re.compile(r"[\u0600-\u06FF]"), "ja": re.compile(r"[\u3040-\u30FF\u4E00-\u9FFF]"),
+    "ko": re.compile(r"[\uAC00-\uD7AF]"), "zh": re.compile(r"[\u4E00-\u9FFF]"),
+    "en": re.compile(r"[A-Za-z]")
 }
 def detect_script_lang(text: str) -> str | None:
     for code, pat in rx.items():
@@ -109,29 +109,23 @@ def detect_script_lang(text: str) -> str | None:
             return code
     return None
 
-def update_content_lang(user_id: int, candidate: str) -> str:
-    arr = last_content_langs.get(user_id, [])
+def update_content_lang(uid: int, candidate: str) -> str:
+    arr = last_content_langs.get(uid, [])
     arr.append(candidate)
-    if len(arr) > 3:
-        arr.pop(0)
-    last_content_langs[user_id] = arr
-    counts: dict[str, int] = {}
-    for c in arr:
-        counts[c] = counts.get(c, 0) + 1
+    if len(arr) > 3: arr.pop(0)
+    last_content_langs[uid] = arr
+    counts = {}
+    for c in arr: counts[c] = counts.get(c, 0) + 1
     best, mx = None, 0
     for k, v in counts.items():
-        if v > mx:
-            best, mx = k, v
-    if mx >= 2:
-        content_lang[user_id] = best
-    return content_lang.get(user_id, candidate)
+        if v > mx: best, mx = k, v
+    if mx >= 2: content_lang[uid] = best
+    return content_lang.get(uid, candidate)
 
-# ------------------- Помощники -------------------
+# ------------------- Вспомогательные -------------------
 def ensure_profile(uid: int):
-    if uid not in ui_lang:
-        ui_lang[uid] = "ru"
-    if uid not in reply_mode:
-        reply_mode[uid] = "expanded"
+    if uid not in ui_lang: ui_lang[uid] = "ru"
+    if uid not in reply_mode: reply_mode[uid] = "expanded"
 
 def compose_reply(lang: str, mode: str) -> str:
     if mode not in ("short","expanded","deep"): mode = "expanded"
@@ -141,8 +135,8 @@ def compose_reply(lang: str, mode: str) -> str:
                 "deep":"מעמיק: הקשר ושלבים מפורטים."}
     elif lang == "en":
         base = {"short":"Summary: received. Brief.",
-                "expanded":"Summary: useful and clear answer.",
-                "deep":"In‑depth: context and step‑by‑step."}
+                "expanded":"Summary: clear and useful answer.",
+                "deep":"In‑depth: context and steps."}
     else:
         base = {"short":"Кратко: запрос принят.",
                 "expanded":"Развёрнуто: дам ясный и полезный ответ.",
@@ -150,8 +144,7 @@ def compose_reply(lang: str, mode: str) -> str:
     return base[mode]
 
 def tts_caption_for_mode(lang: str, mode: str) -> str:
-    t = t_ui(lang)
-    tag = {"short":"Кратко","expanded":"Развёрнуто","deep":"Глубоко"}
+    t = t_ui(lang); tag = {"short":"Кратко","expanded":"Развёрнуто","deep":"Глубоко"}
     return f'{t["tts_caption"]} · {tag.get(mode,"Развёрнуто")}'
 
 # ------------------- TTS (OGG/Opus, fallback MP3) -------------------
@@ -202,15 +195,14 @@ async def on_help(m: Message):
     await m.answer(
         "Доступно: /start, /menu, /help\n"
         "Кнопки: «Дай голосом», «Показать расшифровку», «Сменить язык», «Режим ответа».\n"
-        "Режимы ответа: Кратко / Развёрнуто / Глубоко.",
+        "Режимы: Кратко / Развёрнуто / Глубоко.",
         reply_markup=main_kb(L)
     )
 
-# ------------------- Смена языка интерфейса -------------------
+# ------------------- Смена языка и режима (кнопки) -------------------
 @dp.message(F.text.in_([t_ui("ru")["lang"], t_ui("en")["lang"], t_ui("he")["lang"]]))
 async def ask_lang(m: Message):
-    L = ui_lang.get(m.from_user.id, "ru")
-    t = t_ui(L)
+    L = ui_lang.get(m.from_user.id, "ru"); t = t_ui(L)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Русский", callback_data="ui_ru"),
          InlineKeyboardButton(text="English", callback_data="ui_en")],
@@ -227,11 +219,9 @@ async def on_ui_change(cq):
     await cq.message.edit_text(t_ui(newL)["lang_saved"])
     await bot.send_message(cq.message.chat.id, t_ui(newL)["ready"], reply_markup=main_kb(newL))
 
-# ------------------- Режим ответа -------------------
 @dp.message(F.text.in_([t_ui("ru")["mode"], t_ui("en")["mode"], t_ui("he")["mode"]]))
 async def ask_mode(m: Message):
-    L = ui_lang.get(m.from_user.id, "ru")
-    t = t_ui(L)
+    L = ui_lang.get(m.from_user.id, "ru"); t = t_ui(L)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["mode_short"], callback_data="rm_short"),
          InlineKeyboardButton(text=t["mode_expanded"], callback_data="rm_expanded"),
@@ -241,8 +231,7 @@ async def ask_mode(m: Message):
 
 @dp.callback_query(F.data.in_({"rm_short","rm_expanded","rm_deep"}))
 async def on_mode_change(cq):
-    uid = cq.from_user.id
-    L = ui_lang.get(uid, "ru")
+    uid = cq.from_user.id; L = ui_lang.get(uid, "ru")
     reply_mode[uid] = {"rm_short":"short","rm_expanded":"expanded","rm_deep":"deep"}[cq.data]
     await cq.answer(t_ui(L)["mode_saved"], show_alert=False)
     await cq.message.edit_text(t_ui(L)["mode_saved"])
@@ -262,12 +251,21 @@ async def on_tts_button(m: Message):
     else:
         await m.answer_audio(audio=FSInputFile(path), caption=tts_caption_for_mode(L_ui, mode))
 
-# ------------------- Текст: автоязык контента (стабильно) -------------------
+# ------------------- Текст: автоязык контента (стабильно) + ловушка «скрытого эха» -------------------
 @dp.message(F.text)
 async def on_text(m: Message):
     ensure_profile(m.from_user.id)
     L_ui = ui_lang[m.from_user.id]
     txt = (m.text or "").strip()
+
+    # Анти‑эхо (вариант 2): если сразу после войса пришёл текст, совпадающий с последней расшифровкой — заменяем на структурный ответ
+    if (time.time() - _last_voice_at.get(m.from_user.id, 0) <= 15) and txt and txt == _last_asr_text.get(m.from_user.id, None):
+        mode = reply_mode.get(m.from_user.id, "expanded")
+        Lc   = content_lang.get(m.from_user.id, L_ui)
+        safe_reply = compose_reply(Lc, mode)
+        await m.answer(safe_reply, reply_markup=main_kb(L_ui))
+        return
+
     cand = detect_script_lang(txt) or "en"
     if cand == "en" and len(txt) < 12:
         cand = content_lang.get(m.from_user.id, "ru")
@@ -275,8 +273,8 @@ async def on_text(m: Message):
     mode = reply_mode.get(m.from_user.id, "expanded")
     await m.answer(compose_reply(stable, mode), reply_markup=main_kb(L_ui))
 
-# ------------------- ВОЙС: анти‑эхо (НЕ повторяет вашу речь) -------------------
-async def _summarize_without_echo(lang: str, mode: str) -> str:
+# ------------------- ВОЙС: анти‑эхо (НИКОГДА не повторяет речь) -------------------
+async def _anti_echo_text(lang: str, mode: str) -> str:
     if lang == "he":
         base = {"short":"תקציר: קיבלתי. בלי הדהוד.",
                 "expanded":"תקציר: תשובה עניינית ללא הדהוד.",
@@ -299,21 +297,23 @@ async def on_voice(m: Message):
     Lc   = content_lang.get(m.from_user.id, L_ui)
     mode = reply_mode.get(m.from_user.id, "expanded")
 
-    # 1) Расшифровку НЕ показываем автоматически. Сохраняем только для кнопки.
-    asr_text = ""  # <-- Если подключите ASR, положите сюда текст, НО не отправляйте его.
+    # 1) ВАЖНО: распознанный текст не показываем. Сохраняем только для кнопки и ловушки «скрытого эха».
+    asr_text = ""  # ← сюда вставьте ваш ASR в будущем; сейчас оставляем пустым
     _asr_store[m.from_user.id] = asr_text
+    _last_asr_text[m.from_user.id] = asr_text
+    _last_voice_at[m.from_user.id] = time.time()
 
-    # 2) Даем структурный ответ БЕЗ повтора
-    text = await _summarize_without_echo(Lc, mode)
+    # 2) Даём структурный ответ без повтора
+    text = await _anti_echo_text(Lc, mode)
     await m.answer(text, reply_markup=main_kb(L_ui))
 
-    # 3) Кнопка "Показать расшифровку" (по запросу)
+    # 3) Кнопка «Показать расшифровку» (по запросу)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t_ui(L_ui)["show_tr"], callback_data="show_asr")]
     ])
     await m.answer("Готов показать расшифровку по кнопке:", reply_markup=kb)
 
-    # 4) Озвучка структурного ответа
+    # 4) Озвучка
     try:
         kind, path, _ = tts_make(text, Lc)
         if kind == "voice":
@@ -341,9 +341,8 @@ async def on_photo(m: Message):
     L_ui = ui_lang[m.from_user.id]
     await m.answer(
         "Карточка по фото:\n"
-        "• Расшифровка (OCR): позже подключим.\n"
-        "• Смысл/подписи/хэштеги: по запросу.\n"
-        "• Дизайн‑советы: контраст, безопасные зоны.",
+        "• OCR: подключим позже.\n"
+        "• Подписи/хэштеги и советы — по запросу.",
         reply_markup=main_kb(L_ui)
     )
 
@@ -353,9 +352,8 @@ async def on_video(m: Message):
     L_ui = ui_lang[m.from_user.id]
     await m.answer(
         "Карточка по видео:\n"
-        "• Транскрипт и таймкоды: позже подключим.\n"
-        "• Тезисы и инсайты: по запросу.\n"
-        "• Обложка A/B и план Shorts — доступно.",
+        "• Транскрипт/таймкоды: позже.\n"
+        "• Тезисы/Shorts/обложки — по запросу.",
         reply_markup=main_kb(L_ui)
     )
 
@@ -380,6 +378,7 @@ async def telegram_webhook(req: Request):
 
 @app.on_event("startup")
 async def on_startup():
+    print("ANTI-ECHO v2025-09-02 loaded")  # маркер, что загрузилась новая сборка
     if BASE:
         try:
             await bot.set_webhook(f"{BASE}/telegram/{SECRET}")
