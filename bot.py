@@ -1,11 +1,11 @@
-# SmartPro 24/7 — ANTI-ECHO HOTFIX#4 (Only /menu, Full Inline Menu)
+# SmartPro 24/7 — ANTI‑ECHO HOTFIX#5 (Greeting + Full Inline Menu on /menu only)
 # UX:
-# - /start: приветствие + подсказка «используйте /menu»
-# - /menu: раскрывает ТОЛЬКО inline‑меню (ничего принудительно не показываем)
-# - inline‑меню: Помощь, Оплатить, Рефералы, Профиль, Сменить язык, Режим ответа, Дай голосом, Показать расшифровку, Закрыть
+# - /start: Чёткое приветствие (ничего не раскрываем).
+# - /menu: Открывает ПОЛНОЕ inline‑меню: Помощь • Оплатить • Рефералы • Профиль • Сменить язык • Режим ответа • Дай голосом • Показать расшифровку • Скрыть.
+# - Нет принудительной нижней клавиатуры. Все действия — через /menu (inline‑кнопки).
 # Голос:
-# - не повторяет распознанный текст, авто‑TTS на войс отключён
-# - «Показать расшифровку» будет полезна после подключения ASR (сейчас заглушка)
+# - Никогда не повторяем распознанный текст; авто‑TTS на войс отключён.
+# - «Показать расшифровку» покажет текст только после подключения ASR (пока заглушка).
 
 import os, re, time, tempfile, subprocess
 from fastapi import FastAPI, Request, Response
@@ -14,12 +14,12 @@ from aiogram.filters import Command
 from aiogram.types import (
     Message, Update, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    FSInputFile
+    FSInputFile,
 )
 from gtts import gTTS
 import imageio_ffmpeg
 
-# ---------- Конфигурация (поддержка старых имён переменных) ----------
+# ---------- Конфигурация окружения (поддержка старых имён переменных) ----------
 TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 SECRET = os.getenv("WEBHOOK_SECRET") or os.getenv("TELEGRAM_WEBHOOK_SECRET", "railway123")
 BASE   = os.getenv("BASE_URL") or os.getenv("PUBLIC_BASE_URL", "")
@@ -31,8 +31,8 @@ bot = Bot(TOKEN)
 dp  = Dispatcher()
 app = FastAPI()
 
-VERSION = "ANTI-ECHO v2025-09-02 HOTFIX#4"
-BOT_USERNAME = ""  # заполним на старте через getMe
+VERSION = "ANTI‑ECHO v2025‑09‑02 HOTFIX#5"
+BOT_USERNAME = ""
 
 # ---------- Память сессии (in‑memory) ----------
 ui_lang: dict[int, str] = {}                 # RU/EN/HE
@@ -47,8 +47,11 @@ _last_asr_text: dict[int, str] = {}
 def t_ui(lang: str = "ru"):
     data = {
         "ru": dict(
-            hello="Привет! Я SmartPro 24/7. Используйте /menu, когда нужно открыть меню действий.",
-            ready="Готов. Откройте /menu, чтобы выбрать действие.",
+            hello=(
+                "Привет! Я SmartPro 24/7 — универсальный помощник для текста, голоса и медиа.\n"
+                "Помогу: быстрое резюме, разбор, идеи, сторис, карточки фото/видео.\n"
+                "Чтобы открыть действия — используйте /menu."
+            ),
             menu_title="Меню действий",
             help="Помощь",
             pay="Оплатить",
@@ -67,15 +70,18 @@ def t_ui(lang: str = "ru"):
             lang_choose="Выберите язык интерфейса:",
             lang_saved="Язык интерфейса сохранён.",
             tts_caption="Озвучено",
-            pay_stub="Оплата скоро: Stripe Checkout (USD $10 / $20 / $50). После UAT включим.",
-            refs_stub="Ваша реф‑ссылка:\n{link}\n(Бонус: +3 за каждого платящего друга)",
+            pay_stub="Оплата скоро: Stripe Checkout (USD $10 / $20 / $50). Включим после UAT.",
+            refs_stub="Ваша реф‑ссылка:\n{link}\nБонус: +3 за каждого платящего друга.",
             profile_stub="Профиль:\n— UI язык: {ui}\n— Режим ответа: {mode}\n— Язык контента: {cl}\n— Версия: {ver}",
-            no_transcript="Расшифровка пока недоступна (распознавание временно отключено).",
-            voice_hint="Голос получен. Распознавание временно отключено — отвечу без повтора речи. Нужны действия? Откройте /menu.",
+            no_transcript="Расшифровка пока недоступна (ASR отключён).",
+            voice_hint="Голос получен. Распознавание временно отключено — отвечаю без повтора. Нужны действия? Откройте /menu.",
         ),
         "en": dict(
-            hello="Hi! I'm SmartPro 24/7. Use /menu whenever you need the actions menu.",
-            ready="Ready. Open /menu to choose an action.",
+            hello=(
+                "Hi! I’m SmartPro 24/7 — a universal assistant for text, voice and media.\n"
+                "I help with summaries, deep dives, ideas, stories, and media cards.\n"
+                "Open actions via /menu."
+            ),
             menu_title="Actions menu",
             help="Help",
             pay="Pay",
@@ -95,14 +101,13 @@ def t_ui(lang: str = "ru"):
             lang_saved="Interface language saved.",
             tts_caption="Voiced",
             pay_stub="Payments soon: Stripe Checkout (USD $10 / $20 / $50). Will enable after UAT.",
-            refs_stub="Your referral link:\n{link}\n(Bonus: +3 for each paying friend)",
+            refs_stub="Your referral link:\n{link}\nBonus: +3 for each paying friend.",
             profile_stub="Profile:\n— UI lang: {ui}\n— Reply mode: {mode}\n— Content lang: {cl}\n— Version: {ver}",
             no_transcript="Transcript is not available yet (ASR disabled).",
-            voice_hint="Voice received. ASR is disabled for now — I’ll reply without echo. Need actions? Open /menu.",
+            voice_hint="Voice received. ASR is disabled for now — replying without echo. Need actions? Open /menu.",
         ),
         "he": dict(
             hello="שלום! אני SmartPro 24/7. השתמשו ב‑/menu כדי לפתוח את תפריט הפעולות.",
-            ready="מוכן. פתחו /menu לבחירת פעולה.",
             menu_title="תפריט פעולות",
             help="עזרה",
             pay="לתשלום",
@@ -122,15 +127,14 @@ def t_ui(lang: str = "ru"):
             lang_saved="שפת הממשק נשמרה.",
             tts_caption="הוקרא",
             pay_stub="תשלומים בקרוב: Stripe (USD $10 / $20 / $50). נאפשר לאחר UAT.",
-            refs_stub="קישור ההפניה שלך:\n{link}\n(בונוס: +3 על כל חבר משלם)",
+            refs_stub="קישור ההפניה שלך:\n{link}\nבונוס: +3 על כל חבר משלם.",
             profile_stub="פרופיל:\n— שפת UI: {ui}\n— מצב תגובה: {mode}\n— שפת תוכן: {cl}\n— גרסה: {ver}",
-            no_transcript="עדיין אין תמלול (ASR כבוי).",
-            voice_hint="התקבלה הודעה קולית. ASR כבוי — אענה ללא הדהוד. צריכים פעולות? פתחו /menu.",
+            no_transcript="אין עדיין תמלול (ASR כבוי).",
+            voice_hint="הודעה קולית התקבלה. ASR כבוי — עונה ללא הדהוד. פעולות? פתחו /menu.",
         ),
     }
     return data.get(lang, data["ru"])
 
-# ---------- Инлайн‑меню ----------
 def inline_main_menu(lang: str = "ru"):
     t = t_ui(lang)
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -232,7 +236,7 @@ async def cmd_help(m: Message):
     L = ui_lang[m.from_user.id]
     await m.answer(
         "Как использовать:\n"
-        "— Пишите текст или отправляйте голос — я отвечу без повтора речи.\n"
+        "— Пишите текст или отправляйте голос — отвечу без повтора речи.\n"
         "— Для действий откройте /menu (Оплата, Рефералы, Профиль, Язык, Режим ответа, Озвучка, Расшифровка).\n"
         "— Команды: /start, /menu, /help, /version."
     )
@@ -255,12 +259,11 @@ async def cb_help(cq: CallbackQuery):
     L = ui_lang.get(cq.from_user.id, "ru")
     await cq.message.edit_text(
         "Помощь:\n"
-        "— Откройте /menu, чтобы вызвать действия.\n"
+        "— /menu открывает действия.\n"
         "— «Дай голосом» озвучит мой ответ.\n"
-        "— «Показать расшифровку» покажет текст голосового (после подключения ASR).\n"
+        "— «Показать расшифровку» — после подключения ASR.\n"
         "— «Сменить язык» — RU/EN/HE.\n"
-        "— «Режим ответа» — Кратко/Развёрнуто/Глубоко.\n"
-        "Нажмите «Скрыть», чтобы убрать меню.",
+        "— «Режим ответа» — Кратко/Развёрнуто/Глубоко.",
         reply_markup=inline_main_menu(L)
     )
     await cq.answer()
@@ -331,8 +334,8 @@ async def cb_set_mode(cq: CallbackQuery):
     await cq.answer(t_ui(L)["mode_saved"], show_alert=False)
     await cq.message.edit_text(t_ui(L)["mode_saved"], reply_markup=inline_main_menu(L))
 
+# TTS по запросу «Дай голосом» (через меню)
 def tts_make(text: str, lang: str):
-    # gTTS → mp3 → (по возможности) ogg/opus; если ffmpeg недоступен — вернём mp3
     tmp = tempfile.gettempdir()
     mp3 = os.path.join(tmp, f"{int(time.time()*1000)}.mp3")
     ogg = os.path.join(tmp, f"{int(time.time()*1000)+1}.ogg")
@@ -383,7 +386,7 @@ async def on_text(m: Message):
     L_ui = ui_lang[m.from_user.id]
     txt = (m.text or "").strip()
 
-    # ловушка «скрытого эха» 15 сек
+    # 15‑сек ловушка «скрытого эха»
     if time.time() - _last_voice_at.get(m.from_user.id, 0) <= 15:
         if _norm(txt) == _last_asr_text.get(m.from_user.id, ""):
             mode = reply_mode.get(m.from_user.id, "expanded")
@@ -391,7 +394,7 @@ async def on_text(m: Message):
             await m.answer(compose_reply(Lc, mode))
             return
 
-    # автоязык (EN не по «коротышам» <12)
+    # автоязык (EN не переключаем по «коротышам» <12)
     cand = detect_script_lang(txt) or "en"
     if cand == "en" and len(txt) < 12:
         cand = content_lang.get(m.from_user.id, "ru")
@@ -400,7 +403,7 @@ async def on_text(m: Message):
     mode = reply_mode.get(m.from_user.id, "expanded")
     await m.answer(compose_reply(stable, mode))
 
-# ---------- Голос: анти‑эхо, БЕЗ авто‑TTS и лишних кнопок ----------
+# ---------- Голос: анти‑эхо, БЕЗ авто‑TTS ----------
 @dp.message(F.voice)
 async def on_voice(m: Message):
     ensure_profile(m.from_user.id)
@@ -418,7 +421,6 @@ async def on_voice(m: Message):
         _asr_store.pop(m.from_user.id, None)
         _last_asr_text.pop(m.from_user.id, None)
 
-    # Ответ без повтора + понятное пояснение
     text = await _anti_echo_text(Lc, mode)
     await m.answer(text)
     await m.answer(t_ui(L_ui)["voice_hint"])
@@ -426,7 +428,7 @@ async def on_voice(m: Message):
 # ---------- Фото/Видео: безопасные карточки ----------
 @dp.message(F.photo)
 async def on_photo(m: Message):
-    await m.answer("Фото получено. OCR/Vision пока отключены — ничего не угадываю. После подключения дам «Расшифровку (OCR)» по кнопке в /menu.")
+    await m.answer("Фото получено. OCR/Vision пока отключены — ничего не угадываю. После подключения «Расшифровка (OCR)» будет доступна через /menu.")
 
 @dp.message(F.video | F.video_note)
 async def on_video(m: Message):
