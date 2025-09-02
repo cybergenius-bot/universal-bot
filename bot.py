@@ -1,10 +1,6 @@
-# SmartPro 24/7 — UNIVERSAL GPT‑4o, HOTFIX#7 (Greeting + Full /menu + Stories + Anti‑Echo)
-# — Приветствие на /start (ничего не «выпрыгивает» само)
-# — /menu: полное inline‑меню (Help, Pay, Referrals, Profile, Change language, Reply mode, TTS, Show transcript, Close)
-# — Текстовые ответы: GPT‑4o/4o‑mini, без эха, структурно и обширно (режимы: Кратко/Развёрнуто/Глубоко)
-# — Stories: “сторис про …” генерирует богатые кадры через GPT
-# — Голос: анти‑эхо (без повтора речи), ASR пока отключён
-# — /version и HTTP GET /version показывают текущую версию
+# SmartPro 24/7 — UNIVERSAL GPT‑4o, HOTFIX#7b
+# Greeting + Compact bottom button "Меню" + Full inline menu (+ Close) + GPT‑4o answers + Stories + Anti‑Echo
+# Ничего не "выпрыгивает" само: /start даёт приветствие и одну кнопку "Меню"; сами действия открываются по нажатию "Меню" или /menu.
 
 import os, re, time, asyncio, tempfile, subprocess
 from fastapi import FastAPI, Request, Response
@@ -12,23 +8,24 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, Update, CallbackQuery,
+    ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
     FSInputFile,
 )
-from gtts import gTTS
-import imageio_ffmpeg
 
 # -------- OpenAI (GPT‑4o) --------
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # можно gpt-4o для лучшего качества
-oai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # можно "gpt-4o" для максимума
+oai_client = OpenAI(api_key=OPENAI_API_KEY) if (OpenAI and OPENAI_API_KEY) else None
 
 # -------- Telegram / FastAPI конфиг --------
 TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 SECRET = os.getenv("WEBHOOK_SECRET") or os.getenv("TELEGRAM_WEBHOOK_SECRET", "railway123")
 BASE   = os.getenv("BASE_URL") or os.getenv("PUBLIC_BASE_URL", "")
-
 if not TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN не задан")
 
@@ -36,10 +33,10 @@ bot = Bot(TOKEN)
 dp  = Dispatcher()
 app = FastAPI()
 
-VERSION = "UNIVERSAL GPT‑4o — HOTFIX#7"
+VERSION = "UNIVERSAL GPT‑4o — HOTFIX#7b"
 BOT_USERNAME = ""
 
-# -------- In‑memory состояние --------
+# -------- In‑memory --------
 ui_lang: dict[int, str] = {}                 # RU/EN/HE
 reply_mode: dict[int, str] = {}              # short/expanded/deep
 last_content_langs: dict[int, list[str]] = {}
@@ -48,41 +45,32 @@ _asr_store: dict[int, str] = {}
 _last_voice_at: dict[int, float] = {}
 _last_asr_text: dict[int, str] = {}
 
-# -------- Локализация UI --------
+# -------- Локализация --------
 def t_ui(lang: str = "ru"):
     data = {
         "ru": dict(
-            hello=(
-                "Привет! Я SmartPro 24/7 — универсальный помощник на GPT‑4o для текста, голоса и медиа.\n"
-                "Что могу: Stories, идеи/названия, большие разборы, навигация по темам, карточки фото/видео (OCR позже).\n"
-                "Откройте действия командой /menu. Пишите как удобно — отвечу на языке запроса."
-            ),
+            hello=("Привет! Я SmartPro 24/7 — универсальный помощник на GPT‑4o для текста, голоса и медиа.\n"
+                   "Что могу: обширные ответы, Stories, идеи и названия, большие разборы, карточки фото/видео (OCR позже).\n"
+                   "Откройте действия кнопкой «Меню» внизу или командой /menu."),
+            menu_btn="Меню",
             menu_title="Меню действий",
-            help="Помощь",
-            pay="Оплатить",
-            refs="Рефералы",
-            profile="Профиль",
-            lang="Сменить язык",
-            mode="Режим ответа",
-            say="Дай голосом",
-            show_tr="Показать расшифровку",
-            close="Скрыть",
-            mode_choose="Выберите стиль ответа:",
-            mode_saved="Режим ответа сохранён.",
-            mode_short="Кратко",
-            mode_expanded="Развёрнуто",
-            mode_deep="Глубоко",
-            lang_choose="Выберите язык интерфейса:",
-            lang_saved="Язык интерфейса сохранён.",
+            help="Помощь", pay="Оплатить", refs="Рефералы", profile="Профиль",
+            lang="Сменить язык", mode="Режим ответа",
+            say="Дай голосом", show_tr="Показать расшифровку", close="Скрыть",
+            mode_choose="Выберите стиль ответа:", mode_saved="Режим ответа сохранён.",
+            mode_short="Кратко", mode_expanded="Развёрнуто", mode_deep="Глубоко",
+            lang_choose="Выберите язык интерфейса:", lang_saved="Язык интерфейса сохранён.",
             tts_caption="Озвучено",
-            pay_stub="Оплаты включим после UAT (Stripe USD $10/$20/$50).",
+            pay_stub="Оплаты подключим после UAT (Stripe USD $10/$20/$50).",
             refs_stub="Ваша реф‑ссылка:\n{link}\nБонус: +3 за каждого платящего друга.",
             profile_stub="Профиль:\n— UI язык: {ui}\n— Режим ответа: {mode}\n— Язык контента: {cl}\n— Версия: {ver}",
             no_transcript="Расшифровка пока недоступна (ASR отключён).",
-            voice_hint="Голос получен. Распознавание временно отключено — отвечаю без повтора. Для действий откройте /menu.",
+            voice_hint="Голос получен. Распознавание временно отключено — отвечаю без повтора. Действия — через «Меню».",
         ),
         "en": dict(
-            hello="Hi! I’m SmartPro 24/7 — a GPT‑4o universal assistant for text, voice and media. Use /menu to open actions.",
+            hello=("Hi! I’m SmartPro 24/7 — GPT‑4o universal assistant for text, voice and media.\n"
+                   "Use the bottom “Menu” button or /menu to open actions."),
+            menu_btn="Menu",
             menu_title="Actions menu",
             help="Help", pay="Pay", refs="Referrals", profile="Profile",
             lang="Change language", mode="Reply mode",
@@ -95,11 +83,11 @@ def t_ui(lang: str = "ru"):
             refs_stub="Your referral link:\n{link}\nBonus: +3 per paying friend.",
             profile_stub="Profile:\n— UI lang: {ui}\n— Reply mode: {mode}\n— Content lang: {cl}\n— Version: {ver}",
             no_transcript="Transcript not available yet (ASR disabled).",
-            voice_hint="Voice received. ASR disabled for now — replying without echo. Use /menu for actions.",
+            voice_hint="Voice received. ASR disabled — replying without echo. Use the Menu.",
         ),
         "he": dict(
-            hello="שלום! אני SmartPro 24/7 עם GPT‑4o. פתחו /menu לפעולות.",
-            menu_title="תפריט פעולות",
+            hello="שלום! אני SmartPro 24/7 עם GPT‑4o. השתמשו בכפתור \"תפריט\" או /menu.",
+            menu_btn="תפריט", menu_title="תפריט פעולות",
             help="עזרה", pay="לתשלום", refs="הפניות", profile="פרופיל",
             lang="החלפת שפה", mode="מצב תגובה",
             say="השמע בקול", show_tr="הצג תמלול", close="סגור",
@@ -111,10 +99,20 @@ def t_ui(lang: str = "ru"):
             refs_stub="קישור ההפניה שלך:\n{link}\nבונוס: +3 על כל חבר משלם.",
             profile_stub="פרופיל:\n— שפת UI: {ui}\n— מצב תגובה: {mode}\n— שפת תוכן: {cl}\n— גרסה: {ver}",
             no_transcript="אין עדיין תמלול (ASR כבוי).",
-            voice_hint="הודעה קולית התקבלה. ASR כבוי — עונה ללא הדהוד. /menu לפעולות.",
+            voice_hint="הודעה קולית התקבלה. ASR כבוי — עונה ללא הדהוד. תפריט למטה.",
         ),
     }
     return data.get(lang, data["ru"])
+
+def main_kb(lang: str = "ru"):
+    t = t_ui(lang)
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=t["menu_btn"])]],
+        resize_keyboard=True,
+        is_persistent=False,
+        one_time_keyboard=False,
+        input_field_placeholder="Напишите запрос или нажмите «Меню»"
+    )
 
 def inline_main_menu(lang: str = "ru"):
     t = t_ui(lang)
@@ -132,12 +130,9 @@ def inline_main_menu(lang: str = "ru"):
 
 # -------- Автоязык контента + гистерезис --------
 rx = {
-    "ru": re.compile(r"[А-Яа-яЁё]"),
-    "he": re.compile(r"[א-ת]"),
-    "ar": re.compile(r"[\u0600-\u06FF]"),
-    "ja": re.compile(r"[\u3040-\u30FF\u4E00-\u9FFF]"),
-    "ko": re.compile(r"[\uAC00-\uD7AF]"),
-    "zh": re.compile(r"[\u4E00-\u9FFF]"),
+    "ru": re.compile(r"[А-Яа-яЁё]"), "he": re.compile(r"[א-ת]"),
+    "ar": re.compile(r"[\u0600-\u06FF]"), "ja": re.compile(r"[\u3040-\u30FF\u4E00-\u9FFF]"),
+    "ko": re.compile(r"[\uAC00-\uD7AF]"),  "zh": re.compile(r"[\u4E00-\u9FFF]"),
     "en": re.compile(r"[A-Za-z]"),
 }
 def detect_script_lang(text: str) -> str | None:
@@ -165,10 +160,9 @@ def ensure_profile(uid: int):
     if uid not in ui_lang:    ui_lang[uid] = "ru"
     if uid not in reply_mode: reply_mode[uid] = "expanded"
 
-# -------- Анти‑эхо «рыба» для войса --------
+# -------- Анти‑эхо для войса --------
 async def _anti_echo_text(lang: str, mode: str) -> str:
-    if mode not in ("short","expanded","deep"):
-        mode = "expanded"
+    if mode not in ("short","expanded","deep"): mode = "expanded"
     if lang == "he":
         base = {"short":"תקציר: קיבלתי. בלי הדהוד.",
                 "expanded":"תקציר: תשובה עניינית ללא הדהוד.",
@@ -184,58 +178,36 @@ async def _anti_echo_text(lang: str, mode: str) -> str:
             "deep":"Глубоко: контекст и шаги — без повтора речи."}
     return base[mode]
 
-# -------- GPT‑4o генерация --------
-SYSTEM_CORE_RU = (
-    "Ты — SmartPro 24/7 на GPT‑4o. Правила:\n"
-    "— Не повторяй дословно запрос пользователя (никакого эха).\n"
-    "— Отвечай на языке запроса. Структура по режиму: "
-    "Кратко (3–5 пунктов) / Развёрнуто (2–3 абзаца + список действий) / Глубоко (контекст, пошаговый план, риски).\n"
-    "— Уместные примеры, конкретика, без воды. Для Stories — 4–7 кадров, живые детали, сцены, ритуалы, чек‑лист, CTA.\n"
-    "— Никаких выдумок о фото/видео, если распознавание не подключено.\n"
-)
-SYSTEM_CORE_EN = (
-    "You are SmartPro 24/7 powered by GPT‑4o. Rules:\n"
-    "— Never echo the user’s text.\n"
-    "— Answer in the user’s language. Styles: Short (3–5 bullets) / Expanded (2–3 paragraphs + actions) / In‑depth (context, step‑by‑step, risks).\n"
-    "— Be concrete; add examples. For Stories: 4–7 frames, vivid details, scene, ritual, checklist, CTA.\n"
-    "— Do not invent image/video content if recognition is disabled.\n"
-)
-
+# -------- GPT‑4o ядро --------
 def system_prompt_for_lang(lang: str) -> str:
-    return SYSTEM_CORE_EN if lang == "en" else SYSTEM_CORE_RU
+    if lang == "en":
+        return ("You are SmartPro 24/7 (GPT‑4o). Rules: no echo; answer in user language; "
+                "Short=3–5 bullets; Expanded=2–3 paragraphs + 5–7 actions; In‑depth=context + 7–10 steps + risks; "
+                "Stories=4–7 vivid frames with scene/ritual/checklist/CTA; no made‑up image/video details.")
+    return ("Ты — SmartPro 24/7 (GPT‑4o). Правила: без эха; отвечай на языке запроса; "
+            "Кратко=3–5 пунктов; Развёрнуто=2–3 абзаца + 5–7 шагов; Глубоко=контекст + 7–10 шагов + риски; "
+            "Stories=4–7 живых кадров (сцена/ритуал/чек‑лист/CTA); не выдумывай детали фото/видео.")
 
 async def gpt_answer(user_text: str, lang: str, mode: str) -> str:
     if not oai_client:
         # Fallback без OpenAI
-        if mode == "short":
-            return "Кратко: запрос принят. Дайте 1–2 уточнения — отвечу конкретнее."
-        if mode == "deep":
-            return "Глубоко: распишу контекст и пошаговый план после уточнения цели и ограничений."
-        return "Развёрнуто: дам ясный и полезный ответ по вашему запросу."
-    # Подготовка сообщений
-    style_hint = {
-        "short":   "Формат: 3–5 пунктов с пользой.",
-        "expanded":"Формат: 2–3 абзаца и список действий 5–7 шагов.",
-        "deep":    "Формат: анализ, план 7–10 шагов, риски/метрики."
-    }.get(mode, "Формат: 2–3 абзаца + действия.")
-    system = system_prompt_for_lang(lang)
-    messages = [
-        {"role":"system","content": system + f"\nТекущий режим: {mode}. {style_hint}"},
+        if mode == "short":   return "Кратко: выделите цель и входные данные — отвечу по делу."
+        if mode == "deep":    return "Глубоко: распишу контекст, шаги и риски — уточните цель."
+        return "Развёрнуто: даю содержательный ответ после уточнения контекста."
+    style = {"short":"3–5 bullet points.",
+             "expanded":"2–3 paragraphs + 5–7 actionable steps.",
+             "deep":"analysis + 7–10 steps + risks and metrics."}.get(mode,"2–3 paragraphs + actions.")
+    msgs = [
+        {"role":"system","content": system_prompt_for_lang(lang) + f"\nStyle: {style}"},
         {"role":"user","content": user_text},
     ]
-    # Вызов в отдельном потоке, чтобы не блокировать event loop
     def _call():
-        return oai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            temperature=0.7,
-        )
+        return oai_client.chat.completions.create(model=OPENAI_MODEL, messages=msgs, temperature=0.7)
     resp = await asyncio.to_thread(_call)
     return (resp.choices[0].message.content or "").strip()
 
 async def gpt_stories(topic: str, lang: str, mode: str) -> str:
     if not oai_client:
-        # Простой fallback
         base = [
             f"Кадр 1 — Хук: {topic.capitalize()}",
             "Кадр 2 — Атмосфера: 3 детали сцены.",
@@ -247,23 +219,17 @@ async def gpt_stories(topic: str, lang: str, mode: str) -> str:
         ]
         n = {"short":4,"expanded":6,"deep":7}.get(mode,6)
         return "Готовые Stories:\n" + "\n".join("— "+x for x in base[:n])
-    frames_hint = {
-        "short":   "Сделай 4 кадра.",
-        "expanded":"Сделай 6 кадров.",
-        "deep":    "Сделай 7 кадров."
-    }.get(mode, "Сделай 6 кадров.")
-    prompt = (
-        f"Сгенерируй Stories по теме: «{topic}». {frames_hint} "
-        "Каждый кадр начинается с «— Кадр N — ...». Дай живые детали (звук/свет/движение), короткие фразы, чек‑лист и CTA в конце. "
-        "Не повторяй мой текст и не добавляй префиксы «Вот...». "
-    )
-    system = system_prompt_for_lang(lang)
+    frames = {"short":"Make 4 frames.","expanded":"Make 6 frames.","deep":"Make 7 frames."}.get(mode,"Make 6 frames.")
+    prompt = (f"Create Instagram-like Stories about “{topic}”. {frames} "
+              "Each frame starts with “— Кадр N — ...” (or “— Frame N — ...” in English). "
+              "Use vivid sensory details (light/sound/motion), include a practical step, a small checklist, and a final CTA. "
+              "No echo, no meta text, no apologies.")
+    msgs = [
+        {"role":"system","content": system_prompt_for_lang(lang)},
+        {"role":"user","content": prompt},
+    ]
     def _call():
-        return oai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role":"system","content":system},{"role":"user","content":prompt}],
-            temperature=0.8,
-        )
+        return oai_client.chat.completions.create(model=OPENAI_MODEL, messages=msgs, temperature=0.85)
     resp = await asyncio.to_thread(_call)
     return (resp.choices[0].message.content or "").strip()
 
@@ -278,11 +244,12 @@ def extract_topic(txt: str) -> str:
     return (m.group(1).strip() if m else "") or "тема"
 
 def tts_make(text: str, lang: str):
-    # По запросу из меню (не авто)
     tmp = tempfile.gettempdir()
     mp3 = os.path.join(tmp, f"{int(time.time()*1000)}.mp3")
     ogg = os.path.join(tmp, f"{int(time.time()*1000)+1}.ogg")
     try:
+        from gtts import gTTS
+        import imageio_ffmpeg
         gTTS(text=text, lang=lang if lang in ("ru","en","he") else "en").save(mp3)
         try:
             ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
@@ -294,12 +261,12 @@ def tts_make(text: str, lang: str):
     except Exception:
         return ("text", "", "")
 
-# ======================= Команды =======================
+# ================= Команды =================
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
     ensure_profile(m.from_user.id)
     L = ui_lang[m.from_user.id]
-    await m.answer(t_ui(L)["hello"])
+    await m.answer(t_ui(L)["hello"], reply_markup=main_kb(L))
 
 @dp.message(Command("menu"))
 async def cmd_menu(m: Message):
@@ -311,26 +278,35 @@ async def cmd_menu(m: Message):
 async def cmd_help(m: Message):
     ensure_profile(m.from_user.id)
     L = ui_lang[m.from_user.id]
-    await m.answer("Как использовать:\n— Пишите текст/голос — отвечаю без повтора.\n— Действия — через /menu.\n— Команды: /start, /menu, /help, /version.")
+    await m.answer("Как использовать:\n— Пишите текст/голос — отвечаю без повтора.\n— Действия — через кнопку «Меню» или команду /menu.\n— Команды: /start, /menu, /help, /version.", reply_markup=main_kb(L))
 
 @dp.message(Command("version"))
 async def cmd_version(m: Message):
     await m.answer(VERSION)
 
-# ======================= Inline‑меню =======================
+# Кнопка снизу «Меню»
+@dp.message(F.text.in_([t_ui("ru")["menu_btn"], t_ui("en")["menu_btn"], t_ui("he")["menu_btn"]]))
+async def on_menu_button(m: Message):
+    L = ui_lang.get(m.from_user.id, "ru")
+    await m.answer(t_ui(L)["menu_title"], reply_markup=inline_main_menu(L))
+
+# ================= Inline‑меню =================
 @dp.callback_query(F.data == "m_close")
 async def cb_close(cq: CallbackQuery):
     try:
-        await cq.message.edit_text(" ")
+        await bot.delete_message(chat_id=cq.message.chat.id, message_id=cq.message.message_id)
     except Exception:
-        pass
+        try:
+            await cq.message.edit_text(" ")
+        except Exception:
+            pass
     await cq.answer()
 
 @dp.callback_query(F.data == "m_help")
 async def cb_help(cq: CallbackQuery):
     L = ui_lang.get(cq.from_user.id, "ru")
     await cq.message.edit_text(
-        "Помощь:\n— /menu открывает действия.\n— «Дай голосом» озвучит ответ.\n— «Показать расшифровку» — после подключения ASR.\n— «Сменить язык» — RU/EN/HE.\n— «Режим ответа» — Кратко/Развёрнуто/Глубоко.",
+        "Помощь:\n— Кнопка «Меню» (внизу) или /menu — открыть действия.\n— «Дай голосом» озвучит мой ответ.\n— «Показать расшифровку» — после подключения ASR.\n— «Сменить язык» — RU/EN/HE.\n— «Режим ответа» — Кратко/Развёрнуто/Глубоко.",
         reply_markup=inline_main_menu(L)
     ); await cq.answer()
 
@@ -394,8 +370,8 @@ async def cb_say(cq: CallbackQuery):
     uid = cq.from_user.id; ensure_profile(uid)
     L_ui = ui_lang[uid]; Lc = content_lang.get(uid, L_ui)
     mode = reply_mode.get(uid, "expanded")
-    # Возьмем короткий GPT‑ответ и озвучим
-    text = await gpt_answer("Сделай короткое полезное резюме по моему последнему запросу.", Lc, "short")
+    # краткий GPT‑ответ для озвучки
+    text = await gpt_answer("Сделай короткое полезное резюме по последнему запросу пользователя.", Lc, "short")
     kind, path, _ = tts_make(text, {"ru":"ru","en":"en","he":"he"}.get(Lc, "en"))
     if kind == "voice":
         await bot.send_voice(chat_id=cq.message.chat.id, voice=FSInputFile(path), caption=t_ui(L_ui)["tts_caption"])
@@ -412,43 +388,43 @@ async def cb_showtr(cq: CallbackQuery):
     await bot.send_message(cq.message.chat.id, f"Расшифровка (по запросу):\n{tr}" if tr else t_ui(L)["no_transcript"])
     await cq.answer()
 
-# ======================= Текст: Stories + GPT‑ответ =======================
+# ================= ТЕКСТ: Stories + GPT‑ответ =================
 @dp.message(F.text)
 async def on_text(m: Message):
     ensure_profile(m.from_user.id)
     L_ui = ui_lang[m.from_user.id]
     txt = (m.text or "").strip()
 
-    # Stories
+    # 1) Stories
     if want_stories(txt):
         mode = reply_mode.get(m.from_user.id, "expanded")
         Lc   = content_lang.get(m.from_user.id, "ru")
         topic = extract_topic(txt)
         out = await gpt_stories(topic, Lc, mode)
-        await m.answer(out)
+        await m.answer(out, reply_markup=main_kb(L_ui))
         return
 
-    # Ловушка «скрытого эха» 15 сек
+    # 2) Ловушка «скрытого эха» 15 сек
     if time.time() - _last_voice_at.get(m.from_user.id, 0) <= 15:
         if _norm(txt) == _last_asr_text.get(m.from_user.id, ""):
             mode = reply_mode.get(m.from_user.id, "expanded")
             Lc   = content_lang.get(m.from_user.id, L_ui)
             safe = await _anti_echo_text(Lc, mode)
-            await m.answer(safe)
+            await m.answer(safe, reply_markup=main_kb(L_ui))
             return
 
-    # Автоязык контента (EN не по «коротышам» <12)
+    # 3) Автоязык (EN не по «коротышам» <12)
     cand = detect_script_lang(txt) or "en"
     if cand == "en" and len(txt) < 12:
         cand = content_lang.get(m.from_user.id, "ru")
     stable = update_content_lang(m.from_user.id, cand)
 
-    # GPT‑ответ
+    # 4) GPT‑ответ
     mode = reply_mode.get(m.from_user.id, "expanded")
     answer = await gpt_answer(txt, stable, mode)
-    await m.answer(answer)
+    await m.answer(answer, reply_markup=main_kb(L_ui))
 
-# ======================= Голос: анти‑эхо, без авто‑TTS =======================
+# ================= ВОЙС: анти‑эхо, без авто‑TTS =================
 @dp.message(F.voice)
 async def on_voice(m: Message):
     ensure_profile(m.from_user.id)
@@ -463,23 +439,24 @@ async def on_voice(m: Message):
         _asr_store[m.from_user.id] = asr_text
         _last_asr_text[m.from_user.id] = _norm(asr_text)
     else:
-        _asr_store.pop(m.from_user.id, None)
-        _last_asr_text.pop(m.from_user.id, None)
+        _asr_store.pop(m.from_user.id, None); _last_asr_text.pop(m.from_user.id, None)
 
     text = await _anti_echo_text(Lc, mode)
-    await m.answer(text)
-    await m.answer(t_ui(L_ui)["voice_hint"])
+    await m.answer(text, reply_markup=main_kb(L_ui))
+    await m.answer(t_ui(L_ui)["voice_hint"], reply_markup=main_kb(L_ui))
 
-# ======================= Фото/Видео: безопасные карточки =======================
+# ================= Фото/Видео (без угадываний) =================
 @dp.message(F.photo)
 async def on_photo(m: Message):
-    await m.answer("Фото получено. OCR/Vision пока отключены — ничего не угадываю. После подключения «Расшифровка (OCR)» будет доступна через /menu.")
+    L = ui_lang.get(m.from_user.id, "ru")
+    await m.answer("Фото получено. OCR/Vision пока отключены — ничего не угадываю. «Расшифровка (OCR)» появится после подключения.", reply_markup=main_kb(L))
 
 @dp.message(F.video | F.video_note)
 async def on_video(m: Message):
-    await m.answer("Видео получено. Транскрипт/таймкоды подключим позже. Нужны действия — откройте /menu.")
+    L = ui_lang.get(m.from_user.id, "ru")
+    await m.answer("Видео получено. Транскрипт/таймкоды подключим позже. Действия — через «Меню».", reply_markup=main_kb(L))
 
-# ======================= FastAPI: health + version + webhook =======================
+# ================= FastAPI: health + version + webhook =================
 @app.get("/")
 async def root_ok():
     return Response(content="OK", media_type="text/plain")
