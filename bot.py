@@ -1,4 +1,4 @@
-# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U
+# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U2
 import os
 import re
 import time
@@ -57,7 +57,6 @@ async def ask_openai(
     messages.append({"role": "user", "content": prompt})
     use_model = model or OPENAI_MODEL
     try:
-        # Chat Completions
         resp = client.chat.completions.create(
             model=use_model,
             messages=messages,
@@ -97,7 +96,7 @@ def make_inline_menu(ui_lang: str = "ru"):
         "help": {"ru": "Помощь", "en": "Help", "he": "עזרה"},
         "pay": {"ru": "Оплатить", "en": "Pay", "he": "תשלום"},
         "refs": {"ru": "Рефералы", "en": "Referrals", "he": "הפניות"},
-        "profile": {"ru": "Профиль", "en": "Profile", "he": "פרופיל"},
+        "profile": {"ru": "Профиль", "en": "Profile", "he": "פרופил"},
         "lang": {"ru": "Сменить язык", "en": "Change language", "he": "שנה שפה"},
         "mode": {"ru": "Режим ответа", "en": "Reply mode", "he": "מצב תגובה"},
         "tts": {"ru": "Озвучить (TTS)", "en": "Speak (TTS)", "he": "המרה לדיבור"},
@@ -138,20 +137,15 @@ def script_detect(text: str) -> str:
 def choose_content_lang(user_id: int, text: str) -> str:
     # Избегаем EN на коротких токенах
     if len(text.strip()) < 12:
-        # смотрим гистерезис
         hist = user_lang_hist[user_id]
         if len(hist) >= 2:
-            # если 2 из последних 3 одинаковые — закрепляем
             for lang in ("ru", "en", "he"):
                 if sum(1 for x in hist if x == lang) >= 2:
                     return lang
-        # иначе — текущий ui_lang
         return user_ui_lang[user_id]
     lang = script_detect(text)
-    # обновим гистерезис
     hist = user_lang_hist[user_id]
     hist.append(lang)
-    # если 2 из 3 — закрепляем
     for l in ("ru", "en", "he"):
         if sum(1 for x in hist if x == l) >= 2:
             return l
@@ -161,7 +155,6 @@ def choose_content_lang(user_id: int, text: str) -> str:
 # Anti-echo for voice
 # =========================
 recent_voice_meta: Dict[UserId, Dict[str, float]] = defaultdict(dict)
-# keys: last_ts, last_len, trap_count
 
 def anti_echo_reply(ui_lang: str = "ru"):
     heads = {
@@ -179,6 +172,55 @@ def anti_echo_reply(ui_lang: str = "ru"):
         f"— 1) Цель → 2) Ограничения → 3) Опции → 4) Риски → 5) Следующий шаг.\n\n"
         f"Расшифровку покажу только по кнопке."
     )
+
+# =========================
+# Copy/style utilities (убрать «звёздочки», Markdown и мета-вступления)
+# =========================
+META_PATTERNS = [
+    re.compile(r'^\s*конечно[,.! ]', re.IGNORECASE),
+    re.compile(r'^\s*давайте[,.! ]', re.IGNORECASE),
+    re.compile(r'^\s*с удовольствием[,.! ]', re.IGNORECASE),
+    re.compile(r'^\s*вот как (?:можно|мы) ', re.IGNORECASE),
+    re.compile(r'^\s*предлагаю ', re.IGNORECASE),
+]
+
+def sanitize_output(text: str) -> str:
+    if not text:
+        return text
+
+    # Удаляем Markdown-заголовки и ограды кода
+    lines = text.splitlines()
+    cleaned = []
+    for ln in lines:
+        if ln.strip().startswith("```"):
+            continue
+        ln = re.sub(r'^\s*#{1,6}\s*', '', ln)  # убираем # заголовки
+        ln = re.sub(r'^\s*[-*]\s+', '', ln)    # убираем маркеры списков *, -
+        cleaned.append(ln)
+    text = "\n".join(cleaned)
+
+    # Убираем жир/курсив Markdown: **..**, __..__, *..*, _.._
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'__(.*?)__', r'\1', text)
+    text = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', text)  # одиночные *окружения*
+    text = re.sub(r'(?<!\S)_(.+?)_(?!\S)', r'\1', text)
+
+    # Убираем явные мета-вступления в начале
+    text = text.strip()
+    first_lines = text.splitlines()
+    drop = True
+    while first_lines and drop:
+        head = first_lines[0].strip()
+        if any(pat.match(head) for pat in META_PATTERNS):
+            first_lines.pop(0)
+        else:
+            drop = False
+    text = "\n".join(first_lines).strip()
+
+    # Сжимаем лишние пустые строки
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text
 
 # =========================
 # Commands
@@ -213,10 +255,11 @@ async def set_commands():
     )
 
 # =========================
-# Creative triggers (explicit only)
+# Creative/copy triggers (только по явной просьбе)
 # =========================
 STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(сторис|story|инста-?сторис)\b', re.IGNORECASE)
 NARR_TRIG  = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', re.IGNORECASE)
+COPY_TRIG  = re.compile(r'(пост\s+приветств|приветстви[ея]\b|описани[ея]\b|био\b|bio\b)', re.IGNORECASE)
 
 def extract_topic(txt: str) -> str:
     t = re.sub(r'^\s*(напиши|сделай|сгенерируй)\s+', '', txt, flags=re.IGNORECASE).strip()
@@ -228,7 +271,16 @@ def build_system_prompt(content_lang: str) -> str:
     return (
         "You are SmartPro 24/7, a precise, thorough assistant. "
         "Answer in the user's language with depth and clarity, avoid templates and meta-talk. "
+        "Do NOT use Markdown or asterisks; output plain text only. "
         "Structure as: 1) Краткий ответ; 2) Что важно/нюансы; 3) Разбор/алгоритм; 4) Примеры/кейсы; 5) Следующие шаги/вывод."
+    )
+
+def build_copy_system_prompt(content_lang: str) -> str:
+    return (
+        "Ты опытный русскоязычный копирайтер. Пиши в первом лице, тёплым живым тоном. "
+        "Без Markdown, без звёздочек, без заголовков и списков. "
+        "2–4 абзаца по 1–3 предложения, уместные эмодзи допустимы (например, ✨, 🔮). "
+        "Избегай клише и инструктивных формулировок. Если имя не передано, не используй плейсхолдеры."
     )
 
 # =========================
@@ -252,7 +304,7 @@ async def on_menu_cmd(message: Message):
 
 @router.message(Command("version"))
 async def on_version_cmd(message: Message):
-    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U")
+    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U2")
 
 @router.message(F.text.casefold() == "меню")
 @router.message(F.text.casefold() == "menu")
@@ -289,7 +341,6 @@ async def on_voice(message: Message):
     now = time.time()
     meta = recent_voice_meta[uid]
     meta["last_ts"] = now
-    # Ответ без эха ASR‑текста
     text = anti_echo_reply(ui_lang)
     ik = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text={"ru": "Показать расшифровку", "en": "Show transcript", "he": "הצג תמליל"}.get(ui_lang, "Показать расшифровку"),
@@ -322,6 +373,7 @@ async def on_text(message: Message):
             f"точными наблюдениями и сильной концовкой. Пиши на ({content_lang}). Без вступительных «давайте», без инструкций."
         )
         answer = await ask_openai(prompt, system=sys, temperature=0.9, model="gpt-4o")
+        answer = sanitize_output(answer)
         await message.answer(answer)
         return
 
@@ -335,17 +387,38 @@ async def on_text(message: Message):
             f"Без клише и без объяснений формата."
         )
         answer = await ask_openai(prompt, system=sys, temperature=0.8, model="gpt-4o")
+        answer = sanitize_output(answer)
         await message.answer(answer)
         return
 
-    # 3) По умолчанию — универсальный, развернутый ответ
+    # 3) Явная просьба: ПОСТ/ПРИВЕТСТВИЕ/БИО
+    if COPY_TRIG.search(text):
+        # Попытка угадать имя из фразы «Меня зовут ...»
+        m = re.search(r'меня зовут\s+([A-Za-zА-Яа-яЁё\-]+)', text, re.IGNORECASE)
+        tg_name = (message.from_user.first_name or "").strip() if message.from_user else ""
+        name = m.group(1) if m else tg_name
+        sys = build_copy_system_prompt(content_lang)
+        prompt = (
+            f"Напиши пост-приветствие в первом лице на ({content_lang}). "
+            f"Если имя доступно, используй его: {name if name else 'имя не указано'}. "
+            f"Суть из запроса: {text}. "
+            f"Избегай клише и шаблонов, не используй списки и мета-объяснения."
+        )
+        answer = await ask_openai(prompt, system=sys, temperature=0.65, model=OPENAI_MODEL)
+        answer = sanitize_output(answer)
+        await message.answer(answer)
+        return
+
+    # 4) По умолчанию — универсальный, развернутый ответ
     sys = build_system_prompt(content_lang)
     prompt = (
         f"Запрос пользователя ({content_lang}): {text}\n"
         f"Дай развернутый, точный, небанальный ответ строго по теме. "
-        f"Если есть неоднозначности — кратко перечисли варианты и критерии выбора."
+        f"Если есть неоднозначности — кратко перечисли варианты и критерии выбора. "
+        f"Не используй Markdown и звёздочки, никаких мета-вступлений."
     )
     answer = await ask_openai(prompt, system=sys, temperature=0.55)
+    answer = sanitize_output(answer)
     await message.answer(answer)
 
 # =========================
@@ -353,7 +426,7 @@ async def on_text(message: Message):
 # =========================
 @app.get("/version", response_class=PlainTextResponse)
 async def version():
-    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U"
+    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U2"
 
 @app.post(WEBHOOK_PATH)
 async def tg_webhook(request: Request):
@@ -380,7 +453,6 @@ async def on_startup():
                 drop_pending_updates=True
             )
         except Exception:
-            # допускаем ручную установку вебхука
             pass
 
 # Uvicorn entry: uvicorn bot:app --host 0.0.0.0 --port 8080
