@@ -6,3 +6,4 @@ gTTS==2.5.1
 imageio-ffmpeg==0.4.9
 openai>=1.40.0
 aiogram>=3.0
+aiogram>=3.3
