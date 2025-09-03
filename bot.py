@@ -1,8 +1,9 @@
-# bot.py — UNIVERSAL GPT-4o — HOTFIX#7b
+# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U
 import os
+import re
 import time
 from collections import deque, defaultdict
-from typing import Deque, Dict, Literal, Optional
+from typing import Deque, Dict, Optional
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -41,19 +42,24 @@ def get_openai_client():
             _openai_client = None
     return _openai_client
 
-async def ask_openai(prompt: str, system: Optional[str] = None, temperature: float = 0.7) -> str:
+async def ask_openai(
+    prompt: str,
+    system: Optional[str] = None,
+    temperature: float = 0.7,
+    model: Optional[str] = None
+) -> str:
     client = get_openai_client()
     if not client:
-        # Fallback if no API key configured
         return "Пока у меня нет доступа к GPT‑4o. Подключите OPENAI_API_KEY и перезапустите."
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
+    use_model = model or OPENAI_MODEL
     try:
-        # Chat Completions (совместимо и стабильно)
+        # Chat Completions
         resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=use_model,
             messages=messages,
             temperature=temperature,
         )
@@ -207,6 +213,25 @@ async def set_commands():
     )
 
 # =========================
+# Creative triggers (explicit only)
+# =========================
+STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(сторис|story|инста-?сторис)\b', re.IGNORECASE)
+NARR_TRIG  = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', re.IGNORECASE)
+
+def extract_topic(txt: str) -> str:
+    t = re.sub(r'^\s*(напиши|сделай|сгенерируй)\s+', '', txt, flags=re.IGNORECASE).strip()
+    t = re.sub(r'^(сторис|story|инста-?сторис|рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', '', t, flags=re.IGNORECASE).strip()
+    t = re.sub(r'^\s*(про|о|about)\b', '', t, flags=re.IGNORECASE).strip()
+    return t if t else txt.strip()
+
+def build_system_prompt(content_lang: str) -> str:
+    return (
+        "You are SmartPro 24/7, a precise, thorough assistant. "
+        "Answer in the user's language with depth and clarity, avoid templates and meta-talk. "
+        "Structure as: 1) Краткий ответ; 2) Что важно/нюансы; 3) Разбор/алгоритм; 4) Примеры/кейсы; 5) Следующие шаги/вывод."
+    )
+
+# =========================
 # Handlers
 # =========================
 @router.message(CommandStart())
@@ -227,7 +252,7 @@ async def on_menu_cmd(message: Message):
 
 @router.message(Command("version"))
 async def on_version_cmd(message: Message):
-    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b")
+    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U")
 
 @router.message(F.text.casefold() == "меню")
 @router.message(F.text.casefold() == "menu")
@@ -240,13 +265,11 @@ async def on_close_menu(cb: CallbackQuery):
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:
-        # если нельзя редактировать (устарело) — просто ответим
         pass
     await cb.answer("Скрыто")
 
 @router.callback_query(F.data == "asr")
 async def on_show_transcript(cb: CallbackQuery):
-    # Показать доступную расшифровку (когда ASR подключён). Пока — заглушка.
     await cb.answer()
     await cb.message.answer("Расшифровка будет доступна после подключения ASR (Whisper/gpt‑4o‑mini‑transcribe).")
 
@@ -257,7 +280,6 @@ async def on_change_lang(cb: CallbackQuery):
     cycle = {"ru": "en", "en": "he", "he": "ru"}
     user_ui_lang[uid] = cycle.get(cur, "en")
     await cb.answer(f"UI язык: {user_ui_lang[uid].upper()}")
-    # Обновим клавиатуру «Меню»
     await cb.message.answer("Язык интерфейса изменён.", reply_markup=make_reply_menu_button(user_ui_lang[uid]))
 
 @router.message(F.voice)
@@ -266,9 +288,8 @@ async def on_voice(message: Message):
     ui_lang = user_ui_lang[uid]
     now = time.time()
     meta = recent_voice_meta[uid]
-    last_ts = meta.get("last_ts", 0.0)
     meta["last_ts"] = now
-    # Скрытая ловушка «эхо» 15 сек: мы в любом случае НЕ повторяем ASR‑текст
+    # Ответ без эха ASR‑текста
     text = anti_echo_reply(ui_lang)
     ik = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text={"ru": "Показать расшифровку", "en": "Show transcript", "he": "הצג תמליל"}.get(ui_lang, "Показать расшифровку"),
@@ -280,7 +301,6 @@ async def on_voice(message: Message):
 
 @router.message(F.photo)
 async def on_photo(message: Message):
-    # Без авто‑OCR. Даём безопасную карточку + кнопки в инлайн‑меню.
     await message.answer(
         "Изображение получено. OCR будет доступен через меню после подключения. Пока я отвечу по текстовому запросу.",
     )
@@ -289,23 +309,43 @@ async def on_photo(message: Message):
 async def on_text(message: Message):
     uid = message.from_user.id
     ui = user_ui_lang[uid]
-    text = message.text or ""
+    text = (message.text or "").strip()
     content_lang = choose_content_lang(uid, text)
 
-    # «сторис про …» / "story about …" простая эвристика
-    lowered = text.lower().strip()
-    if lowered.startswith("сторис про ") or lowered.startswith("история про ") or lowered.startswith("story about "):
-        topic = text.split("про ", 1)[-1] if "про " in lowered else text.split("about ", 1)[-1]
-        sys = "You are a world‑class creative writer crafting cinematic Instagram‑style stories with vivid sensory details, rhythm, and emotional arc. Write in the user's language."
-        prompt = f"Напиши кинематографичную сторис про: {topic}. Сделай 6‑8 коротких кадров (1‑2 фразы на кадр), с запахами, звуками, тактильными ощущениями, без клише, с мощной концовкой."
-        answer = await ask_openai(prompt, system=sys, temperature=0.85)
+    # 1) Явная просьба: СТОРИС
+    if STORY_TRIG.match(text):
+        topic = extract_topic(text)
+        sys = "You are a world‑class creative writer crafting cinematic, sensory Instagram‑style stories in the user's language. No clichés, no guides."
+        prompt = (
+            f"Тема сторис: {topic}\n"
+            f"Напиши 6–8 кинематографичных кадров (1–2 насыщенные фразы на кадр) со звуками/запахами/тактильностью, "
+            f"точными наблюдениями и сильной концовкой. Пиши на ({content_lang}). Без вступительных «давайте», без инструкций."
+        )
+        answer = await ask_openai(prompt, system=sys, temperature=0.9, model="gpt-4o")
         await message.answer(answer)
         return
 
-    # Обычный расширенный ответ
-    sys = "You are SmartPro 24/7, a precise, helpful assistant. Give comprehensive, structured answers in the detected user language."
-    prompt = f"Вопрос пользователя ({content_lang}): {text}\nДай развернутый, точный ответ, избегая шаблонов. Если уместно, предложи пример/шаги/советы."
-    answer = await ask_openai(prompt, system=sys, temperature=0.6)
+    # 2) Явная просьба: РАССКАЗ/ЭССЕ
+    if NARR_TRIG.match(text):
+        topic = extract_topic(text)
+        sys = "You are a literary writer. Produce a concise but vivid short narrative in the user's language with sensory detail and a clear arc."
+        prompt = (
+            f"Тема рассказа: {topic}\n"
+            f"Напиши короткий рассказ 350–600 слов на ({content_lang}), с образностью, ритмом, сценами, диалогами по необходимости. "
+            f"Без клише и без объяснений формата."
+        )
+        answer = await ask_openai(prompt, system=sys, temperature=0.8, model="gpt-4o")
+        await message.answer(answer)
+        return
+
+    # 3) По умолчанию — универсальный, развернутый ответ
+    sys = build_system_prompt(content_lang)
+    prompt = (
+        f"Запрос пользователя ({content_lang}): {text}\n"
+        f"Дай развернутый, точный, небанальный ответ строго по теме. "
+        f"Если есть неоднозначности — кратко перечисли варианты и критерии выбора."
+    )
+    answer = await ask_openai(prompt, system=sys, temperature=0.55)
     await message.answer(answer)
 
 # =========================
@@ -313,7 +353,7 @@ async def on_text(message: Message):
 # =========================
 @app.get("/version", response_class=PlainTextResponse)
 async def version():
-    return "UNIVERSAL GPT‑4o — HOTFIX#7b"
+    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U"
 
 @app.post(WEBHOOK_PATH)
 async def tg_webhook(request: Request):
