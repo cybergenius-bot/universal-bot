@@ -1,5 +1,10 @@
-# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U7
-# U7: жёсткий санитайзер Markdown/«звёздочек» + мгновенное RU/HE автоопределение + parse_mode=None + send_clean для всех ответов
+# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U8
+# U8:
+# 1) Жёсткий санитайзер Markdown/«звёздочек»/маркеров, но эмодзи сохраняем (включая ✨, 🔮 и др.)
+# 2) parse_mode=None — Telegram не применяет форматирование
+# 3) Автоязык: RU/HE — сразу; EN — только если не коротыш (<12 символов)
+# 4) Триггеры сторис/рассказ ловят «напиши мне ... сторис/рассказ ...»
+# 5) Все ответы через send_clean(...)
 
 import os
 import re
@@ -23,7 +28,7 @@ from aiogram.filters import Command, CommandStart
 # Env
 # =========================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-BASE_URL = os.environ.get("BASE_URL", "")
+BASE_URL = os.environ.get("BASE_URL", "")  # https://universal-bot-production.up.railway.app
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "railway123-secret")
 WEBHOOK_PATH = "/telegram/railway123"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -124,7 +129,7 @@ def detect_script_lang(text: str) -> Optional[str]:
 def choose_content_lang(user_id: int, text: str) -> str:
     t = (text or "").strip()
     det = detect_script_lang(t)
-    # EN — не переключаемся на коротышах; RU/HE — переключаемся мгновенно (исправляет иврит)
+    # EN — не переключаемся на коротышах; RU/HE — переключаемся мгновенно
     if det == "en" and len(t) < 12:
         det = None
     if det in ("ru", "he"):
@@ -163,10 +168,12 @@ def anti_echo_reply(ui_lang: str = "ru"):
     )
 
 # =========================
-# Sanitize: убираем ВСЕ «звёздочки»/Markdown/маркеры
+# Sanitize: убираем Markdown/«звёздочки»/маркеры, сохраняя эмодзи
 # =========================
-STAR_CHARS = r"\*\u2217\u2731\u204E\uFE61\uFF0A\u272B\u272A\u2729\u2728\u2605\u2606"  # * ∗ ✱ ⁎ ﹡ ＊ ❋ ❊ ❉ ❈ ★ ☆
-BULLET_CHARS = r"\-\+\•\►\▪\▫\●\○\◆\◇\★\☆"
+# ВНИМАНИЕ: не трогаем эмодзи вроде ✨/🔮 и т.п.
+ASTERISK_LIKE = r"\*\u2217\u2731\u204E\uFE61\uFF0A"  # * ∗ ✱ ⁎ ﹡ ＊
+BULLET_START = r"\-\+•►▪▫●○◆◇"                      # маркеры списков в начале строки
+HEADER_PAT = re.compile(r'^\s*#{1,6}\s*')             # ### Заголовок
 
 META_PATTERNS = [
     re.compile(r'^\s*конечно[,.! ]', re.IGNORECASE),
@@ -176,44 +183,44 @@ META_PATTERNS = [
     re.compile(r'^\s*предлагаю\b', re.IGNORECASE),
 ]
 
+def strip_markdown_line_start(ln: str) -> str:
+    # удаляем code‑fence
+    if ln.strip().startswith("```"):
+        return ""
+    # убираем ### заголовки
+    ln = HEADER_PAT.sub("", ln)
+    # убираем маркеры списков в начале строки (-, +, •, ►, ▪ и т.п.)
+    ln = re.sub(rf'^\s*([{BULLET_START}])\s+', '', ln)
+    return ln
+
 def sanitize_output(text: str) -> str:
     if not text:
         return text
-    # Построчная чистка
-    out_lines = []
-    for ln in text.splitlines():
-        s = ln.strip()
-        # code fence
-        if s.startswith("```"):
-            continue
-        # заголовки Markdown
-        ln = re.sub(r'^\s*#{1,6}\s*', '', ln)
-        # маркеры списков в начале строки (включая буллет‑символы)
-        ln = re.sub(rf'^\s*([{BULLET_CHARS}])\s+', '', ln)
-        out_lines.append(ln)
-    text = "\n".join(out_lines)
+    # 1) Построчная чистка
+    lines = [strip_markdown_line_start(ln) for ln in text.splitlines()]
+    text = "\n".join(ln for ln in lines if ln is not None)
 
-    # Жир/курсив Markdown: **..**, __..__, *..*, _.._
+    # 2) Убираем жир/курсив Markdown: **..**, __..__, *..*, _.._
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text, flags=re.S)
     text = re.sub(r'__(.*?)__', r'\1', text, flags=re.S)
     text = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', text, flags=re.S)
     text = re.sub(r'(?<!\S)_(.+?)_(?!\S)', r'\1', text, flags=re.S)
 
-    # Сносим любые «звёздочки» и аналоги, где бы они ни стояли
-    text = re.sub(rf'[{STAR_CHARS}`]+', '', text)
+    # 3) Убираем одиночные «звёздочки» и аналоги (но НЕ эмодзи-«звёзды»)
+    text = re.sub(rf'[{ASTERISK_LIKE}`]+', '', text)
 
-    # Убираем стартовые «мета‑фразы»
+    # 4) Сносим стартовые мета‑фразы
     text = text.strip()
-    lines = text.splitlines()
-    while lines:
-        head = lines[0].strip()
+    ls = text.splitlines()
+    while ls:
+        head = ls[0].strip()
         if any(p.match(head) for p in META_PATTERNS):
-            lines.pop(0)
+            ls.pop(0)
         else:
             break
-    text = "\n".join(lines).strip()
+    text = "\n".join(ls).strip()
 
-    # Сжимаем лишние пустые строки и пробелы
+    # 5) Сжимаем лишние пустые строки и пробелы
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]{2,}', ' ', text)
     return text
@@ -246,17 +253,42 @@ def build_user_prompt(lang: str, user_text: str) -> str:
     return f"User request: {user_text}\nProvide a precise, non-generic answer. No Markdown or asterisks."
 
 # =========================
-# Triggers (explicit creative only)
+# Triggers (explicit creative only, tolerant to words in between)
 # =========================
-STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(сторис|story|инста-?сторис)\b', re.IGNORECASE)
-NARR_TRIG  = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', re.IGNORECASE)
+STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\b.*\b(сторис|story|инста-?сторис)\b', re.IGNORECASE | re.S)
+NARR_TRIG  = re.compile(r'^\s*(напиши|сделай|сгенерируй)\b.*\b(рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', re.IGNORECASE | re.S)
 COPY_TRIG  = re.compile(r'(пост\s+приветств|приветстви[ея]\b|описани[ея]\b|био\b|bio\b)', re.IGNORECASE)
 
-def extract_topic(txt: str) -> str:
-    t = re.sub(r'^\s*(напиши|сделай|сгенерируй)\s+', '', txt, flags=re.IGNORECASE).strip()
-    t = re.sub(r'^(сторис|story|инста-?сторис|рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', '', t, flags=re.IGNORECASE).strip()
-    t = re.sub(r'^\s*(про|о|about)\b', '', t, flags=re.IGNORECASE).strip()
-    return t if t else txt.strip()
+def extract_topic_after_keyword(txt: str, keywords: list[str]) -> str:
+    # берём текст после ключевого слова (сторис/рассказ/…)
+    pattern = re.compile(r'(' + '|'.join(map(re.escape, keywords)) + r')\b', re.IGNORECASE)
+    m = pattern.search(txt)
+    tail = txt[m.end():] if m else txt
+    tail = re.sub(r'^\s*(про|о|about)\b', '', tail, flags=re.IGNORECASE).strip()
+    return tail if tail else txt.strip()
+
+# =========================
+# Commands
+# =========================
+async def set_commands():
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Приветствие"),
+         BotCommand(command="menu", description="Открыть меню"),
+         BotCommand(command="version", description="Проверить версию")],
+        scope=BotCommandScopeDefault(), language_code="ru",
+    )
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Greeting"),
+         BotCommand(command="menu", description="Open menu"),
+         BotCommand(command="version", description="Check version")],
+        scope=BotCommandScopeDefault(), language_code="en",
+    )
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="ברכה"),
+         BotCommand(command="menu", description="פתח תפריט"),
+         BotCommand(command="version", description="בדיקת גרסה")],
+        scope=BotCommandScopeDefault(), language_code="he",
+    )
 
 # =========================
 # Handlers
@@ -277,7 +309,7 @@ async def on_menu_cmd(message: Message):
 
 @router.message(Command("version"))
 async def on_version_cmd(message: Message):
-    await send_clean(message, "UNIVERSAL GPT‑4o — HOTFIX#7b‑U7")
+    await send_clean(message, "UNIVERSAL GPT‑4o — HOTFIX#7b‑U8")
 
 @router.message(F.text.casefold() == "меню")
 @router.message(F.text.casefold() == "menu")
@@ -379,9 +411,9 @@ async def on_text(message: Message):
     text = (message.text or "").strip()
     content_lang = choose_content_lang(uid, text)
 
-    # СТОРИС — явная просьба
+    # 1) СТОРИС — явная просьба, допускаем «мне/пожалуйста» между словами
     if STORY_TRIG.match(text):
-        topic = extract_topic(text)
+        topic = extract_topic_after_keyword(text, ["сторис", "story", "инста-сторис", "инста сторис"])
         sys = ("You are a world‑class creative writer crafting cinematic, sensory Instagram‑style stories. "
                f"Answer strictly in { 'Russian' if content_lang=='ru' else ('Hebrew' if content_lang=='he' else 'English') }. "
                "No Markdown, no asterisks.")
@@ -391,9 +423,9 @@ async def on_text(message: Message):
         ans = await ask_openai(prompt, system=sys, temperature=0.9, model="gpt-4o")
         return await send_clean(message, ans)
 
-    # Рассказ/эссе — явная просьба
+    # 2) Рассказ/эссе — явная просьба
     if NARR_TRIG.match(text):
-        topic = extract_topic(text)
+        topic = extract_topic_after_keyword(text, ["рассказ", "эссе", "сочинение", "повесть", "short story", "essay"])
         sys = ("You are a literary writer. Produce a vivid short narrative. "
                f"Answer strictly in { 'Russian' if content_lang=='ru' else ('Hebrew' if content_lang=='he' else 'English') }. "
                "No Markdown, no asterisks.")
@@ -403,7 +435,7 @@ async def on_text(message: Message):
         ans = await ask_openai(prompt, system=sys, temperature=0.8, model="gpt-4o")
         return await send_clean(message, ans)
 
-    # Копирайт (приветствие/био/описание)
+    # 3) Копирайт (приветствие/био/описание)
     if COPY_TRIG.search(text):
         m = re.search(r'меня зовут\s+([A-Za-zА-Яа-яЁё\-]+)', text, re.IGNORECASE)
         tg_name = (message.from_user.first_name or "").strip() if message.from_user else ""
@@ -415,7 +447,7 @@ async def on_text(message: Message):
         ans = await ask_openai(prompt, system=sys, temperature=0.65)
         return await send_clean(message, ans)
 
-    # По умолчанию — универсальный ответ
+    # 4) По умолчанию — универсальный ответ
     sys = system_prompt_for(content_lang)
     prompt = build_user_prompt(content_lang, text)
     ans = await ask_openai(prompt, system=sys, temperature=0.55)
@@ -426,7 +458,7 @@ async def on_text(message: Message):
 # =========================
 @app.get("/version", response_class=PlainTextResponse)
 async def version():
-    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U7"
+    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U8"
 
 @app.post(WEBHOOK_PATH)
 async def tg_webhook(request: Request):
@@ -444,30 +476,11 @@ async def healthz():
 
 @app.on_event("startup")
 async def on_startup():
-    # На старте сбросим вебхук (на всякий случай) и поставим заново
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
         pass
-    await bot.delete_my_commands(scope=BotCommandScopeDefault())
-    await bot.set_my_commands(
-        [BotCommand(command="start", description="Приветствие"),
-         BotCommand(command="menu", description="Открыть меню"),
-         BotCommand(command="version", description="Проверить версию")],
-        scope=BotCommandScopeDefault(), language_code="ru",
-    )
-    await bot.set_my_commands(
-        [BotCommand(command="start", description="Greeting"),
-         BotCommand(command="menu", description="Open menu"),
-         BotCommand(command="version", description="Check version")],
-        scope=BotCommandScopeDefault(), language_code="en",
-    )
-    await bot.set_my_commands(
-        [BotCommand(command="start", description="ברכה"),
-         BotCommand(command="menu", description="פתח תפריט"),
-         BotCommand(command="version", description="בדיקת גרסה")],
-        scope=BotCommandScopeDefault(), language_code="he",
-    )
+    await set_commands()
     if BASE_URL and TELEGRAM_BOT_TOKEN:
         try:
             await bot.set_webhook(url=BASE_URL + WEBHOOK_PATH, secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
