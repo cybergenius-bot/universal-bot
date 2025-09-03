@@ -1,4 +1,4 @@
-# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U2
+# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U3
 import os
 import re
 import time
@@ -96,7 +96,7 @@ def make_inline_menu(ui_lang: str = "ru"):
         "help": {"ru": "Помощь", "en": "Help", "he": "עזרה"},
         "pay": {"ru": "Оплатить", "en": "Pay", "he": "תשלום"},
         "refs": {"ru": "Рефералы", "en": "Referrals", "he": "הפניות"},
-        "profile": {"ru": "Профиль", "en": "Profile", "he": "פרופил"},
+        "profile": {"ru": "Профиль", "en": "Profile", "he": "פרופיל"},
         "lang": {"ru": "Сменить язык", "en": "Change language", "he": "שנה שפה"},
         "mode": {"ru": "Режим ответа", "en": "Reply mode", "he": "מצב תגובה"},
         "tts": {"ru": "Озвучить (TTS)", "en": "Speak (TTS)", "he": "המרה לדיבור"},
@@ -174,38 +174,38 @@ def anti_echo_reply(ui_lang: str = "ru"):
     )
 
 # =========================
-# Copy/style utilities (убрать «звёздочки», Markdown и мета-вступления)
+# Copy/style utilities (убрать Markdown и «звёздочки» в любых формах)
 # =========================
 META_PATTERNS = [
     re.compile(r'^\s*конечно[,.! ]', re.IGNORECASE),
     re.compile(r'^\s*давайте[,.! ]', re.IGNORECASE),
     re.compile(r'^\s*с удовольствием[,.! ]', re.IGNORECASE),
-    re.compile(r'^\s*вот как (?:можно|мы) ', re.IGNORECASE),
-    re.compile(r'^\s*предлагаю ', re.IGNORECASE),
+    re.compile(r'^\s*вот как (?:можно|мы)\b', re.IGNORECASE),
+    re.compile(r'^\s*предлагаю\b', re.IGNORECASE),
 ]
 
 def sanitize_output(text: str) -> str:
     if not text:
         return text
 
-    # Удаляем Markdown-заголовки и ограды кода
+    # 1) Сносим ограды кода и #‑заголовки
     lines = text.splitlines()
     cleaned = []
     for ln in lines:
         if ln.strip().startswith("```"):
             continue
-        ln = re.sub(r'^\s*#{1,6}\s*', '', ln)  # убираем # заголовки
-        ln = re.sub(r'^\s*[-*]\s+', '', ln)    # убираем маркеры списков *, -
+        ln = re.sub(r'^\s*#{1,6}\s*', '', ln)   # #, ##, ...
+        ln = re.sub(r'^\s*[-*]\s+', '', ln)     # маркеры списков -, *
         cleaned.append(ln)
     text = "\n".join(cleaned)
 
-    # Убираем жир/курсив Markdown: **..**, __..__, *..*, _.._
+    # 2) Убираем Markdown‑жир/курсив и любые парные **__ выделения
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     text = re.sub(r'__(.*?)__', r'\1', text)
-    text = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', text)  # одиночные *окружения*
+    text = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', text)
     text = re.sub(r'(?<!\S)_(.+?)_(?!\S)', r'\1', text)
 
-    # Убираем явные мета-вступления в начале
+    # 3) Удаляем явные мета‑вступления в начале
     text = text.strip()
     first_lines = text.splitlines()
     drop = True
@@ -217,8 +217,11 @@ def sanitize_output(text: str) -> str:
             drop = False
     text = "\n".join(first_lines).strip()
 
-    # Сжимаем лишние пустые строки
+    # 4) Сжимаем лишние пустые строки
     text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # 5) Добиваем все оставшиеся «звёздочки» (в том числе «висячие»)
+    text = re.sub(r'\*+', '', text)
 
     return text
 
@@ -304,7 +307,7 @@ async def on_menu_cmd(message: Message):
 
 @router.message(Command("version"))
 async def on_version_cmd(message: Message):
-    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U2")
+    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U3")
 
 @router.message(F.text.casefold() == "меню")
 @router.message(F.text.casefold() == "menu")
@@ -312,18 +315,34 @@ async def on_menu_text(message: Message):
     uid = message.from_user.id
     await message.answer("Меню действий:", reply_markup=make_inline_menu(user_ui_lang[uid]))
 
-@router.callback_query(F.data == "close_menu")
-async def on_close_menu(cb: CallbackQuery):
-    try:
-        await cb.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await cb.answer("Скрыто")
+# ---------- Inline buttons: все отвечают ----------
+@router.callback_query(F.data == "help")
+async def on_help(cb: CallbackQuery):
+    uid = cb.from_user.id
+    ui = user_ui_lang[uid]
+    await cb.answer("Открываю помощь…", show_alert=False)
+    text = {
+        "ru": "Я универсальный помощник. Просто задайте вопрос. Сторис/рассказ — только по явной просьбе («напиши сторис…», «сделай рассказ…»). Без Markdown и звёздочек.",
+        "en": "I’m a universal assistant. Ask anything. Stories/narratives only on explicit request. No markdown/asterisks.",
+        "he": "עוזר אוניברסלי. שאל/י כל דבר. סטוריז/סיפור רק בבקשה מפורשת. ללא Markdown וכוכביות.",
+    }.get(ui, "Я универсальный помощник. Просто задайте вопрос.")
+    await cb.message.answer(text)
 
-@router.callback_query(F.data == "asr")
-async def on_show_transcript(cb: CallbackQuery):
-    await cb.answer()
-    await cb.message.answer("Расшифровка будет доступна после подключения ASR (Whisper/gpt‑4o‑mini‑transcribe).")
+@router.callback_query(F.data == "pay")
+async def on_pay(cb: CallbackQuery):
+    await cb.answer("Оплата скоро будет доступна", show_alert=False)
+    await cb.message.answer("Оплата появится позже (Stripe Checkout).")
+
+@router.callback_query(F.data == "refs")
+async def on_refs(cb: CallbackQuery):
+    await cb.answer("Рефералы", show_alert=False)
+    await cb.message.answer("Реферальные ссылки появятся позже. Формат: t.me/<bot>?start=ref_<uid>.")
+
+@router.callback_query(F.data == "profile")
+async def on_profile(cb: CallbackQuery):
+    await cb.answer("Профиль", show_alert=False)
+    user = cb.from_user
+    await cb.message.answer(f"Профиль: {user.first_name or ''} {user.last_name or ''}".strip())
 
 @router.callback_query(F.data == "lang")
 async def on_change_lang(cb: CallbackQuery):
@@ -334,6 +353,35 @@ async def on_change_lang(cb: CallbackQuery):
     await cb.answer(f"UI язык: {user_ui_lang[uid].upper()}")
     await cb.message.answer("Язык интерфейса изменён.", reply_markup=make_reply_menu_button(user_ui_lang[uid]))
 
+@router.callback_query(F.data == "mode")
+async def on_mode(cb: CallbackQuery):
+    await cb.answer("Режим ответа", show_alert=False)
+    await cb.message.answer("Режим ответа: универсальный. Творчество по явной просьбе.")
+
+@router.callback_query(F.data == "tts")
+async def on_tts(cb: CallbackQuery):
+    await cb.answer("TTS", show_alert=False)
+    await cb.message.answer("Озвучка (TTS) будет доступна по кнопке, когда подключим движок.")
+
+@router.callback_query(F.data == "asr")
+async def on_show_transcript(cb: CallbackQuery):
+    await cb.answer("Показать расшифровку", show_alert=False)
+    await cb.message.answer("Расшифровка будет доступна после подключения ASR (Whisper/gpt‑4o‑mini‑transcribe).")
+
+@router.callback_query(F.data == "close_menu")
+async def on_close_menu(cb: CallbackQuery):
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.answer("Скрыто")
+
+# Safety: любой неизвестный callback хотя бы подтверждаем
+@router.callback_query()
+async def on_any_callback(cb: CallbackQuery):
+    await cb.answer("Готово", show_alert=False)
+
+# ---------- Voice / Photo ----------
 @router.message(F.voice)
 async def on_voice(message: Message):
     uid = message.from_user.id
@@ -356,6 +404,9 @@ async def on_photo(message: Message):
         "Изображение получено. OCR будет доступен через меню после подключения. Пока я отвечу по текстовому запросу.",
     )
 
+# =========================
+# Text handler
+# =========================
 @router.message()
 async def on_text(message: Message):
     uid = message.from_user.id
@@ -393,7 +444,6 @@ async def on_text(message: Message):
 
     # 3) Явная просьба: ПОСТ/ПРИВЕТСТВИЕ/БИО
     if COPY_TRIG.search(text):
-        # Попытка угадать имя из фразы «Меня зовут ...»
         m = re.search(r'меня зовут\s+([A-Za-zА-Яа-яЁё\-]+)', text, re.IGNORECASE)
         tg_name = (message.from_user.first_name or "").strip() if message.from_user else ""
         name = m.group(1) if m else tg_name
@@ -409,7 +459,7 @@ async def on_text(message: Message):
         await message.answer(answer)
         return
 
-    # 4) По умолчанию — универсальный, развернутый ответ
+    # 4) По умолчанию — универсальный, развернутый ответ (без Markdown)
     sys = build_system_prompt(content_lang)
     prompt = (
         f"Запрос пользователя ({content_lang}): {text}\n"
@@ -426,7 +476,7 @@ async def on_text(message: Message):
 # =========================
 @app.get("/version", response_class=PlainTextResponse)
 async def version():
-    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U2"
+    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U3"
 
 @app.post(WEBHOOK_PATH)
 async def tg_webhook(request: Request):
