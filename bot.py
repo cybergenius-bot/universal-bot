@@ -1,11 +1,8 @@
-# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U4
-# Изменения U4:
-# 1) Полное удаление любых «звёздочек» и Markdown в ответах (усилен sanitize_output)
-# 2) Автоязык контента: надёжнее распознаём скрипт; для EN сохраняем защиту от коротких «ok» (не переключаемся на EN при <12 символов),
-#    но для RU/HE переключаемся сразу даже на коротких репликах (исправляет кейс с ивритом)
-# 3) Локализованные системные промпты: отвечаем строго на языке пользователя (ru/en/he), без Markdown/звёздочек
-# 4) Кнопки инлайн‑меню работают и отвечают (осталось с U3)
-
+# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U5
+# U5:
+# 1) Жёсткий санитайзер: убираем любые «*», Markdown-заголовки/списки, жир/курсив — на всех ответах модели
+# 2) Автодетект языка: RU/HE — переключение сразу; EN — только если не коротыш (<12 символов)
+# 3) Инлайн‑кнопки отвечают; меню — как договорено (компактная «Меню» снизу, инлайн — по запросу, закрывается)
 import os
 import re
 import time
@@ -33,10 +30,10 @@ BASE_URL = os.environ.get("BASE_URL", "")  # e.g., https://universal-bot-product
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "railway123-secret")
 WEBHOOK_PATH = "/telegram/railway123"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")  # set to "gpt-4o" for maximum quality
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")  # set "gpt-4o" for max quality
 
 # =========================
-# OpenAI client (lazy)
+# OpenAI
 # =========================
 _openai_client = None
 def get_openai_client():
@@ -49,35 +46,26 @@ def get_openai_client():
             _openai_client = None
     return _openai_client
 
-async def ask_openai(
-    prompt: str,
-    system: Optional[str] = None,
-    temperature: float = 0.7,
-    model: Optional[str] = None
-) -> str:
+async def ask_openai(prompt: str, system: Optional[str] = None, temperature: float = 0.7, model: Optional[str] = None) -> str:
     client = get_openai_client()
     if not client:
-        return "Пока у меня нет доступа к GPT‑4o. Подключите OPENAI_API_KEY и перезапустите."
-    messages = []
+        return "Пока нет доступа к GPT‑4o. Подключите OPENAI_API_KEY и перезапустите."
+    msgs = []
     if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+        msgs.append({"role": "system", "content": system})
+    msgs.append({"role": "user", "content": prompt})
     use_model = model or OPENAI_MODEL
     try:
-        resp = client.chat.completions.create(
-            model=use_model,
-            messages=messages,
-            temperature=temperature,
-        )
+        resp = client.chat.completions.create(model=use_model, messages=msgs, temperature=temperature)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"Не смог получить ответ от модели ({type(e).__name__}): {e}"
 
 # =========================
-# App, Bot, DP, Router
+# App/Bot
 # =========================
 app = FastAPI()
-bot = Bot(token=TELEGRAM_BOT_TOKEN, parse_mode=ParseMode.HTML)  # отправляем обычный текст, без Markdown
+bot = Bot(token=TELEGRAM_BOT_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -90,10 +78,8 @@ def make_reply_menu_button(ui_lang: str = "ru"):
     return ReplyKeyboardMarkup(
         resize_keyboard=True,
         keyboard=[[KeyboardButton(text=text)]],
-        input_field_placeholder={"ru": "Напишите сообщение…",
-                                 "en": "Type a message…",
-                                 "he": "הקלד/י הודעה…"
-                                 }.get(ui_lang, "Напишите сообщение…"),
+        input_field_placeholder={"ru": "Напишите сообщение…", "en": "Type a message…", "he": "הקלד/י הודעה…"}
+            .get(ui_lang, "Напишите сообщение…"),
         selective=True
     )
 
@@ -123,51 +109,41 @@ def make_inline_menu(ui_lang: str = "ru"):
     ])
 
 # =========================
-# Language policy: content_lang auto + hysteresis; ui_lang fixed by user
+# Language policy
 # =========================
 UserId = int
 user_ui_lang: Dict[UserId, str] = defaultdict(lambda: "ru")
-user_lang_hist: Dict[UserId, Deque[str]] = defaultdict(lambda: deque(maxlen=3))  # last 3 content langs
+user_lang_hist: Dict[UserId, Deque[str]] = defaultdict(lambda: deque(maxlen=3))
 
 def detect_script_lang(text: str) -> Optional[str]:
-    heb = sum('\u0590' <= ch <= '\u05FF' for ch in text)  # Hebrew
-    cyr = sum('А' <= ch <= 'я' or ch in "ёЁ" for ch in text)  # Cyrillic
-    lat = sum('A' <= ch <= 'z' for ch in text)  # Latin
-    # Приоритет: максимальный счёт; если равенство — None (пусть решит гистерезис)
-    if heb > cyr and heb > lat and heb > 0:
-        return "he"
-    if cyr > lat and cyr > heb and cyr > 0:
-        return "ru"
-    if lat > cyr and lat > heb and lat > 0:
-        return "en"
+    heb = sum('\u0590' <= ch <= '\u05FF' for ch in text)   # Hebrew
+    cyr = sum('А' <= ch <= 'я' or ch in "ёЁ" for ch in text) # Cyrillic
+    lat = sum('A' <= ch <= 'z' for ch in text)               # Latin
+    if heb > cyr and heb > lat and heb > 0: return "he"
+    if cyr > lat and cyr > heb and cyr > 0: return "ru"
+    if lat > cyr and lat > heb and lat > 0: return "en"
     return None
 
 def choose_content_lang(user_id: int, text: str) -> str:
-    text_stripped = (text or "").strip()
-    detected = detect_script_lang(text_stripped)
-
-    # Особая защита от случайных коротких EN-токенов ("ok", "yes", "hi"):
-    if detected == "en" and len(text_stripped) < 12:
-        detected = None  # не переключаемся на EN из-за коротышей
-
-    # Для RU/HE переключаемся сразу, даже если коротко (исправляет кейс с ивритом)
-    if detected in ("ru", "he"):
-        lang = detected
-    elif detected == "en":
+    t = (text or "").strip()
+    det = detect_script_lang(t)
+    # EN — не переключаемся на коротышах; RU/HE — переключаемся мгновенно (фикс иврита)
+    if det == "en" and len(t) < 12:
+        det = None
+    if det in ("ru", "he"):
+        lang = det
+    elif det == "en":
         lang = "en"
     else:
-        # Не удалось уверенно определить: используем гистерезис или ui_lang
         hist = user_lang_hist[user_id]
         if len(hist) >= 2:
             for l in ("ru", "en", "he"):
                 if sum(1 for x in hist if x == l) >= 2:
                     return l
         lang = user_ui_lang[user_id]
-
-    # Обновим гистерезис и вернём итого
+    # обновим гистерезис
     hist = user_lang_hist[user_id]
     hist.append(lang)
-    # «закрепляем» если 2 из 3 последних одинаковые
     for l in ("ru", "en", "he"):
         if sum(1 for x in hist if x == l) >= 2:
             return l
@@ -179,24 +155,19 @@ def choose_content_lang(user_id: int, text: str) -> str:
 recent_voice_meta: Dict[UserId, Dict[str, float]] = defaultdict(dict)
 
 def anti_echo_reply(ui_lang: str = "ru"):
-    heads = {
-        "ru": ("Кратко", "Детали", "Чек‑лист"),
-        "en": ("Brief", "Details", "Checklist"),
-        "he": ("תמצית", "פרטים", "צ׳ק‑ליסט"),
-    }
+    heads = {"ru": ("Кратко", "Детали", "Чек‑лист"),
+             "en": ("Brief", "Details", "Checklist"),
+             "he": ("תמצית", "פרטים", "צ׳ק‑ליסט")}
     h = heads.get(ui_lang, heads["ru"])
     return (
-        f"{h[0]}: Я услышал(а) ваш голос и понял(а) задачу. "
-        f"Сформулирую ответ без повтора вашей речи.\n\n"
-        f"{h[1]}: Опишу подход, предложу варианты и подводные камни. "
-        f"Если нужна расшифровка аудио, нажмите кнопку ниже.\n\n"
-        f"{h[2]}:\n"
-        f"— 1) Цель → 2) Ограничения → 3) Опции → 4) Риски → 5) Следующий шаг.\n\n"
+        f"{h[0]}: Я услышал(а) ваш голос и понял(а) задачу. Сформулирую ответ без повтора вашей речи.\n\n"
+        f"{h[1]}: Опишу подход, предложу варианты и подводные камни. Если нужна расшифровка — нажмите кнопку ниже.\n\n"
+        f"{h[2]}:\n— 1) Цель → 2) Ограничения → 3) Опции → 4) Риски → 5) Следующий шаг.\n\n"
         f"Расшифровку покажу только по кнопке."
     )
 
 # =========================
-# Copy/style utilities — убираем Markdown/«звёздочки»/маркеры
+# Sanitize: убираем Markdown/«звёздочки»
 # =========================
 META_PATTERNS = [
     re.compile(r'^\s*конечно[,.! ]', re.IGNORECASE),
@@ -209,129 +180,112 @@ META_PATTERNS = [
 def sanitize_output(text: str) -> str:
     if not text:
         return text
-
-    # Сносим ограды кода и #‑заголовки
+    # Сносим ограды кода и #‑заголовки построчно; маркеры списков в начале строки
     lines = text.splitlines()
     cleaned = []
     for ln in lines:
-        if ln.strip().startswith("```"):
+        s = ln.strip()
+        if s.startswith("```"):
             continue
-        # Удаляем Markdown-заголовки
+        # убираем Markdown заголовки ###, ##, #
         ln = re.sub(r'^\s*#{1,6}\s*', '', ln)
-        # Удаляем маркеры списков в начале строки: -, *, +, •, ► и т.п.
+        # убираем маркеры списков в начале строки: -, *, +, •, ►, ▪ и т.д.
         ln = re.sub(r'^\s*[-*+•►▪▫●○◆◇★☆]\s+', '', ln)
-        # Удаляем жир/курсив Markdown внутри строки (**, __, *word*, _word_)
-        ln = re.sub(r'\*\*(.*?)\*\*', r'\1', ln)
-        ln = re.sub(r'__(.*?)__', r'\1', ln)
-        ln = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', ln)
-        ln = re.sub(r'(?<!\S)_(.+?)_(?!\S)', r'\1', ln)
         cleaned.append(ln)
     text = "\n".join(cleaned)
 
-    # Добиваем любые оставшиеся «звёздочки» и псевдозвёзды
-    text = re.sub(r'[\*•►▪▫●○◆◇★☆]+', '', text)
+    # Убираем жир/курсив Markdown: **..**, __..__, *..*, _.._
+    # (работает с любыми буквами, в т.ч. иврит)
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'__(.*?)__', r'\1', text)
+    text = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', text)
+    text = re.sub(r'(?<!\S)_(.+?)_(?!\S)', r'\1', text)
 
-    # Убираем явные мета‑вступления в начале
+    # Сносим остаточные «звёздочки» и псевдозвёзды где угодно
+    text = re.sub(r'[\*•►▪▫●○◆◇★☆`]+', '', text)
+
+    # Убираем мета‑вступления в начале
     text = text.strip()
-    first_lines = text.splitlines()
-    drop = True
-    while first_lines and drop:
-        head = first_lines[0].strip()
-        if any(pat.match(head) for pat in META_PATTERNS):
-            first_lines.pop(0)
+    first = text.splitlines()
+    while first:
+        head = first[0].strip()
+        if any(p.match(head) for p in META_PATTERNS):
+            first.pop(0)
         else:
-            drop = False
-    text = "\n".join(first_lines).strip()
+            break
+    text = "\n".join(first).strip()
 
     # Сжимаем лишние пустые строки
     text = re.sub(r'\n{3,}', '\n\n', text)
-
     return text
 
+# Помощник: отправка текста с санитайзером
+async def send_clean(msg_or_chat, text: str, **kwargs):
+    return await msg_or_chat.answer(sanitize_output(text), **kwargs)
+
 # =========================
-# Helpers: локализация системных промптов
+# System prompts
 # =========================
 def system_prompt_for(lang: str) -> str:
     if lang == "ru":
         return ("Ты SmartPro 24/7 — точный и обстоятельный помощник. "
-                "Отвечай строго на русском. Без Markdown и без «*». Пиши обычным текстом. "
-                "Структура: 1) Кратко; 2) Что важно/нюансы; 3) Разбор/алгоритм; 4) Примеры; 5) Шаги/вывод.")
+                "Отвечай строго на русском. Без Markdown и без «*». Обычный текст.")
     if lang == "he":
         return ("את/ה SmartPro 24/7 — עוזר/ת מדויק/ת ויסודי/ת. "
-                "ענה אך ורק בעברית. בלי Markdown ובלי כוכביות. טקסט פשוט. "
-                "מבנה: 1) בקצרה; 2) מה חשוב/ניואנסים; 3) ניתוח/אלגוריתם; 4) דוגמאות; 5) צעדים/סיכום.")
-    # en (default)
+                "ענה אך ורק בעברית. ללא Markdown וללא כוכביות. טקסט פשוט.")
     return ("You are SmartPro 24/7 — precise and thorough. "
-            "Answer strictly in English. No Markdown and no asterisks. Plain text. "
-            "Structure: 1) Brief; 2) Key nuances; 3) Breakdown/steps; 4) Examples; 5) Next steps.")
+            "Answer strictly in English. No Markdown or asterisks. Plain text.")
 
 def copy_system_prompt_for(lang: str) -> str:
     if lang == "ru":
-        return ("Ты опытный русскоязычный копирайтер. Пиши в первом лице, тёплым живым тоном. "
-                "Без Markdown, без «*», без заголовков и списков. 2–4 абзаца по 1–3 предложения. "
-                "Избегай клише и инструктивных фраз. Если имя не передано — не используй плейсхолдеры.")
+        return ("Ты опытный русскоязычный копирайтер. Первый лицо, тёплый живой тон. "
+                "Без Markdown и «*». Без списков/заголовков. 2–4 коротких абзаца.")
     if lang == "he":
-        return ("את/ה קופירייטר/ית מנוסה. כתוב/כתבי בגוף ראשון, בטון חם וחי. "
-                "בלי Markdown ובלי כוכביות. 2–4 פסקאות של 1–3 משפטים. הימנע/י מקלישאות.")
-    return ("You are an experienced copywriter. First person, warm and lively tone. "
-            "No Markdown, no asterisks, no headings or lists. 2–4 short paragraphs. Avoid clichés.")
+        return ("את/ה קופירייטר/ית מנוסה. גוף ראשון, טון חם וחי. "
+                "ללא Markdown וללא כוכביות. ללא רשימות/כותרות. 2–4 פסקאות קצרות.")
+    return ("You are an experienced copywriter. First person, warm tone. "
+            "No Markdown or asterisks. No lists/headings. 2–4 short paragraphs.")
 
 def build_user_prompt(lang: str, user_text: str) -> str:
     if lang == "ru":
-        return (f"Запрос пользователя: {user_text}\n"
-                f"Дай развернутый, точный, небанальный ответ строго по теме. "
-                f"Если есть неоднозначности — кратко перечисли варианты и критерии выбора. "
-                f"Не используй Markdown и «*».")
+        return f"Запрос пользователя: {user_text}\nДай точный, небанальный ответ по теме. Без Markdown и «*»."
     if lang == "he":
-        return (f"בקשת המשתמש: {user_text}\n"
-                f"תן/י תשובה מעמיקה ומדויקת בנושא. אם יש אי־בהירויות — הצג/י אפשרויות ושיקולי בחירה. "
-                f"ללא Markdown וללא כוכביות.")
-    return (f"User request: {user_text}\n"
-            f"Provide an in‑depth, precise, non‑generic answer strictly to the point. "
-            f"If ambiguous, list options and selection criteria briefly. No Markdown or asterisks.")
+        return f"בקשת המשתמש: {user_text}\nענה/עני תשובה מדויקת וישירה בנושא. בלי Markdown ובלי כוכביות."
+    return f"User request: {user_text}\nProvide a precise, non-generic answer. No Markdown or asterisks."
 
 # =========================
 # Commands
 # =========================
 async def set_commands():
     await bot.set_my_commands(
-        commands=[
-            BotCommand(command="start", description="Приветствие"),
-            BotCommand(command="menu", description="Открыть меню"),
-            BotCommand(command="version", description="Проверить версию"),
-        ],
-        scope=BotCommandScopeDefault(),
-        language_code="ru",
+        [BotCommand(command="start", description="Приветствие"),
+         BotCommand(command="menu", description="Открыть меню"),
+         BotCommand(command="version", description="Проверить версию")],
+        scope=BotCommandScopeDefault(), language_code="ru",
     )
     await bot.set_my_commands(
-        commands=[
-            BotCommand(command="start", description="Greeting"),
-            BotCommand(command="menu", description="Open menu"),
-            BotCommand(command="version", description="Check version"),
-        ],
-        scope=BotCommandScopeDefault(),
-        language_code="en",
+        [BotCommand(command="start", description="Greeting"),
+         BotCommand(command="menu", description="Open menu"),
+         BotCommand(command="version", description="Check version")],
+        scope=BotCommandScopeDefault(), language_code="en",
     )
     await bot.set_my_commands(
-        commands=[
-            BotCommand(command="start", description="ברכה"),
-            BotCommand(command="menu", description="פתח תפריט"),
-            BotCommand(command="version", description="בדיקת גרסה"),
-        ],
-        scope=BotCommandScopeDefault(),
-        language_code="he",
+        [BotCommand(command="start", description="ברכה"),
+         BotCommand(command="menu", description="פתח תפריט"),
+         BotCommand(command="version", description="בדיקת גרסה")],
+        scope=BotCommandScopeDefault(), language_code="he",
     )
 
 # =========================
-# Creative/copy triggers (только по явной просьбе)
+# Triggers (explicit creative only)
 # =========================
-STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(сторис|story|инста-?сторיס|инста-?сторис)\b', re.IGNORECASE)
+STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(сторис|story|инста-?сторис)\b', re.IGNORECASE)
 NARR_TRIG  = re.compile(r'^\s*(напиши|сделай|сгенерируй)\s+(рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', re.IGNORECASE)
 COPY_TRIG  = re.compile(r'(пост\s+приветств|приветстви[ея]\b|описани[ея]\b|био\b|bio\b)', re.IGNORECASE)
 
 def extract_topic(txt: str) -> str:
     t = re.sub(r'^\s*(напиши|сделай|сгенерируй)\s+', '', txt, flags=re.IGNORECASE).strip()
-    t = re.sub(r'^(сторис|story|инста-?сторис|инста-?сторיס|рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', '', t, flags=re.IGNORECASE).strip()
+    t = re.sub(r'^(сторис|story|инста-?сторис|рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', '', t, flags=re.IGNORECASE).strip()
     t = re.sub(r'^\s*(про|о|about)\b', '', t, flags=re.IGNORECASE).strip()
     return t if t else txt.strip()
 
@@ -342,11 +296,9 @@ def extract_topic(txt: str) -> str:
 async def on_start(message: Message):
     uid = message.from_user.id
     kb = make_reply_menu_button(user_ui_lang[uid])
-    text = {
-        "ru": "Привет! Я SmartPro 24/7. Нажмите «Меню», когда нужно открыть действия.",
-        "en": "Hi! I’m SmartPro 24/7. Tap “Menu” when you want actions.",
-        "he": "היי! אני SmartPro 24/7. לחצו \"תפריט\" כדי לפתוח פעולות.",
-    }[user_ui_lang[uid]]
+    text = {"ru": "Привет! Я SmartPro 24/7. Нажмите «Меню», когда нужно открыть действия.",
+            "en": "Hi! I’m SmartPro 24/7. Tap “Menu” when you want actions.",
+            "he": "היי! אני SmartPro 24/7. לחצו \"תפריט\" כדי לפתוח פעולות."}[user_ui_lang[uid]]
     await message.answer(text, reply_markup=kb)
 
 @router.message(Command("menu"))
@@ -356,7 +308,7 @@ async def on_menu_cmd(message: Message):
 
 @router.message(Command("version"))
 async def on_version_cmd(message: Message):
-    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U4")
+    await message.answer("UNIVERSAL GPT‑4o — HOTFIX#7b‑U5")
 
 @router.message(F.text.casefold() == "меню")
 @router.message(F.text.casefold() == "menu")
@@ -371,9 +323,9 @@ async def on_help(cb: CallbackQuery):
     ui = user_ui_lang[uid]
     await cb.answer("Открываю помощь…", show_alert=False)
     text = {
-        "ru": "Я универсальный помощник. Просто задайте вопрос. Сторис/рассказ — только по явной просьбе. Без Markdown и «*».",
-        "en": "I’m a universal assistant. Ask anything. Stories/narratives only on explicit request. No Markdown/asterisks.",
-        "he": "עוזר אוניברסלי. שאל/י כל דבר. סטוריז/סיפור רק בבקשה מפורשת. ללא Markdown וכוכביות.",
+        "ru": "Я универсальный помощник. Просто задайте вопрос. Сторис/рассказ — по явной просьбе. Без Markdown и «*».",
+        "en": "Universal assistant. Ask anything. Stories/narratives on explicit request. No markdown/asterisks.",
+        "he": "עוזר אוניברסלי. אפשר לשאול הכל. סטוריז/סיפור רק בבקשה מפורשת. בלי Markdown וכוכביות.",
     }.get(ui, "Я универсальный помощник. Просто задайте вопрос.")
     await cb.message.answer(text)
 
@@ -405,7 +357,7 @@ async def on_change_lang(cb: CallbackQuery):
 @router.callback_query(F.data == "mode")
 async def on_mode(cb: CallbackQuery):
     await cb.answer("Режим ответа", show_alert=False)
-    await cb.message.answer("Режим ответа: универсальный. Творчество по явной просьбе.")
+    await cb.message.answer("Режим ответа: универсальный. Творчество — по явной просьбе.")
 
 @router.callback_query(F.data == "tts")
 async def on_tts(cb: CallbackQuery):
@@ -434,22 +386,19 @@ async def on_any_callback(cb: CallbackQuery):
 async def on_voice(message: Message):
     uid = message.from_user.id
     ui_lang = user_ui_lang[uid]
-    now = time.time()
-    recent_voice_meta[uid]["last_ts"] = now
+    recent_voice_meta[uid]["last_ts"] = time.time()
     text = anti_echo_reply(ui_lang)
     ik = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text={"ru": "Показать расшифровку", "en": "Show transcript", "he": "הצג תמליל"}.get(ui_lang, "Показать расшифровку"),
+        [InlineKeyboardButton(text={"ru": "Показать расшифровку", "en": "Show transcript", "he": "הצג תמליל"}[ui_lang],
                               callback_data="asr")],
-        [InlineKeyboardButton(text={"ru": "Скрыть", "en": "Close", "he": "סגור"}.get(ui_lang, "Скрыть"),
+        [InlineKeyboardButton(text={"ru": "Скрыть", "en": "Close", "he": "סגור"}[ui_lang],
                               callback_data="close_menu")],
     ])
-    await message.answer(text, reply_markup=ik)
+    await send_clean(message, text, reply_markup=ik)
 
 @router.message(F.photo)
 async def on_photo(message: Message):
-    await message.answer(
-        "Изображение получено. OCR будет доступен через меню после подключения. Пока я отвечу по текстовому запросу.",
-    )
+    await send_clean(message, "Изображение получено. OCR будет доступен через меню после подключения. Пока я отвечу по тексту.")
 
 # =========================
 # Text handler
@@ -461,67 +410,54 @@ async def on_text(message: Message):
     text = (message.text or "").strip()
     content_lang = choose_content_lang(uid, text)
 
-    # 1) Явная просьба: СТОРИС
+    # 1) СТОРИС — только по явной просьбе
     if STORY_TRIG.match(text):
         topic = extract_topic(text)
         sys = ("You are a world‑class creative writer crafting cinematic, sensory Instagram‑style stories. "
                f"Answer strictly in { 'Russian' if content_lang=='ru' else ('Hebrew' if content_lang=='he' else 'English') }. "
                "No Markdown, no asterisks.")
-        prompt = (
-            f"Тема сторис: {topic}\n"
-            f"Напиши 6–8 кинематографичных кадров (1–2 насыщенные фразы на кадр) со звуками/запахами/тактильностью, "
-            f"точными наблюдениями и сильной концовкой. Пиши на ({content_lang}). Без вступительных фраз и инструкций."
-        )
-        answer = await ask_openai(prompt, system=sys, temperature=0.9, model="gpt-4o")
-        answer = sanitize_output(answer)
-        await message.answer(answer)
-        return
+        prompt = (f"Тема сторис: {topic}\n"
+                  f"Напиши 6–8 кинематографичных кадров (1–2 насыщенные фразы на кадр) со звуками/запахами/тактильностью, "
+                  f"точными наблюдениями и сильной концовкой. Пиши на ({content_lang}). Без вступительных фраз и инструкций.")
+        ans = await ask_openai(prompt, system=sys, temperature=0.9, model="gpt-4o")
+        return await send_clean(message, ans)
 
-    # 2) Явная просьба: РАССКАЗ/ЭССЕ
+    # 2) Рассказ/эссе — по явной просьбе
     if NARR_TRIG.match(text):
         topic = extract_topic(text)
         sys = ("You are a literary writer. Produce a vivid short narrative. "
                f"Answer strictly in { 'Russian' if content_lang=='ru' else ('Hebrew' if content_lang=='he' else 'English') }. "
                "No Markdown, no asterisks.")
-        prompt = (
-            f"Тема рассказа: {topic}\n"
-            f"Напиши короткий рассказ 350–600 слов на ({content_lang}), с образностью, ритмом, сценами, диалогами по необходимости. "
-            f"Без клише и без объяснений формата."
-        )
-        answer = await ask_openai(prompt, system=sys, temperature=0.8, model="gpt-4o")
-        answer = sanitize_output(answer)
-        await message.answer(answer)
-        return
+        prompt = (f"Тема рассказа: {topic}\n"
+                  f"Напиши короткий рассказ 350–600 слов на ({content_lang}), с образностью, ритмом, сценами, диалогами по необходимости. "
+                  f"Без клише и без объяснений формата.")
+        ans = await ask_openai(prompt, system=sys, temperature=0.8, model="gpt-4o")
+        return await send_clean(message, ans)
 
-    # 3) Явная просьба: ПОСТ/ПРИВЕТСТВИЕ/БИО
+    # 3) Копирайт (приветствие/био/описание)
     if COPY_TRIG.search(text):
         m = re.search(r'меня зовут\s+([A-Za-zА-Яа-яЁё\-]+)', text, re.IGNORECASE)
         tg_name = (message.from_user.first_name or "").strip() if message.from_user else ""
         name = m.group(1) if m else tg_name
         sys = copy_system_prompt_for(content_lang)
-        prompt = (
-            f"Напиши пост-приветствие в первом лице на ({content_lang}). "
-            f"Если имя доступно, используй его: {name if name else 'имя не указано'}. "
-            f"Суть из запроса: {text}. Избегай клише и шаблонов, не используй списки и мета-объяснения."
-        )
-        answer = await ask_openai(prompt, system=sys, temperature=0.65)
-        answer = sanitize_output(answer)
-        await message.answer(answer)
-        return
+        prompt = (f"Напиши пост-приветствие в первом лице на ({content_lang}). "
+                  f"Если имя доступно, используй его: {name if name else 'имя не указано'}. "
+                  f"Суть из запроса: {text}. Избегай клише и шаблонов, не используй списки и заголовки.")
+        ans = await ask_openai(prompt, system=sys, temperature=0.65)
+        return await send_clean(message, ans)
 
-    # 4) По умолчанию — универсальный, развернутый ответ (строго на языке пользователя)
+    # 4) По умолчанию — универсальный ответ на языке пользователя
     sys = system_prompt_for(content_lang)
     prompt = build_user_prompt(content_lang, text)
-    answer = await ask_openai(prompt, system=sys, temperature=0.55)
-    answer = sanitize_output(answer)
-    await message.answer(answer)
+    ans = await ask_openai(prompt, system=sys, temperature=0.55)
+    return await send_clean(message, ans)
 
 # =========================
 # FastAPI routes
 # =========================
 @app.get("/version", response_class=PlainTextResponse)
 async def version():
-    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U4"
+    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U5"
 
 @app.post(WEBHOOK_PATH)
 async def tg_webhook(request: Request):
@@ -542,12 +478,8 @@ async def on_startup():
     await set_commands()
     if BASE_URL and TELEGRAM_BOT_TOKEN:
         try:
-            await bot.set_webhook(
-                url=BASE_URL + WEBHOOK_PATH,
-                secret_token=WEBHOOK_SECRET,
-                drop_pending_updates=True
-            )
+            await bot.set_webhook(url=BASE_URL + WEBHOOK_PATH, secret_token=WEBHOOK_SECRET, drop_pending_updates=True)
         except Exception:
             pass
 
-# Uvicorn entry: uvicorn bot:app --host 0.0.0.0 --port 8080
+# Start: uvicorn bot:app --host 0.0.0.0 --port 8080
