@@ -1,10 +1,10 @@
-# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U8
-# U8:
-# 1) Жёсткий санитайзер Markdown/«звёздочек»/маркеров, но эмодзи сохраняем (включая ✨, 🔮 и др.)
-# 2) parse_mode=None — Telegram не применяет форматирование
-# 3) Автоязык: RU/HE — сразу; EN — только если не коротыш (<12 символов)
-# 4) Триггеры сторис/рассказ ловят «напиши мне ... сторис/рассказ ...»
-# 5) Все ответы через send_clean(...)
+# bot.py — UNIVERSAL GPT‑4o — HOTFIX#7b‑U9
+# U9:
+# 1) Санитайзер ещё жёстче: сносит ###, жир/курсив, маркеры списков (- + • ► ● ▪ ▫ ◆ ◇ ★ ☆, а также — и – в начале строки), code-fence, blockquote '>'
+# 2) Эмодзи сохраняем; нумерация 1., 2., 3. сохраняется
+# 3) parse_mode=None, все ответы через send_clean(...)
+# 4) Автоязык RU/HE — сразу; EN — только если не коротыш (<12 символов)
+# 5) Сторис/рассказ — только по явной просьбе, без Markdown
 
 import os
 import re
@@ -28,7 +28,7 @@ from aiogram.filters import Command, CommandStart
 # Env
 # =========================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-BASE_URL = os.environ.get("BASE_URL", "")  # https://universal-bot-production.up.railway.app
+BASE_URL = os.environ.get("BASE_URL", "")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "railway123-secret")
 WEBHOOK_PATH = "/telegram/railway123"
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -67,7 +67,7 @@ async def ask_openai(prompt: str, system: Optional[str] = None, temperature: flo
 # App/Bot/DP
 # =========================
 app = FastAPI()
-bot = Bot(token=TELEGRAM_BOT_TOKEN, parse_mode=None)  # без форматирования Telegram
+bot = Bot(token=TELEGRAM_BOT_TOKEN, parse_mode=None)  # отключаем форматирование Telegram
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -168,12 +168,15 @@ def anti_echo_reply(ui_lang: str = "ru"):
     )
 
 # =========================
-# Sanitize: убираем Markdown/«звёздочки»/маркеры, сохраняя эмодзи
+# Sanitize: убираем Markdown/«звёздочки»/маркеры, сохраняем эмодзи и нумерацию
 # =========================
-# ВНИМАНИЕ: не трогаем эмодзи вроде ✨/🔮 и т.п.
+# «звёздочки»-аналоги (не затрагиваем эмодзи ✨ 🔮 и др.)
 ASTERISK_LIKE = r"\*\u2217\u2731\u204E\uFE61\uFF0A"  # * ∗ ✱ ⁎ ﹡ ＊
-BULLET_START = r"\-\+•►▪▫●○◆◇"                      # маркеры списков в начале строки
-HEADER_PAT = re.compile(r'^\s*#{1,6}\s*')             # ### Заголовок
+# маркеры списков в начале строки, включая тире: - + • ► ▪ ▫ ● ○ ◆ ◇ и также —, –
+BULLET_START = r"\-\+\•\►\▪\▫\●\○\◆\◇"
+HEADER_PAT = re.compile(r'^\s*#{1,6}\s*')
+BLOCKQUOTE_PAT = re.compile(r'^\s*>\s+')
+DASH_BULLET_PAT = re.compile(r'^\s*[–—]\s+')
 
 META_PATTERNS = [
     re.compile(r'^\s*конечно[,.! ]', re.IGNORECASE),
@@ -184,13 +187,18 @@ META_PATTERNS = [
 ]
 
 def strip_markdown_line_start(ln: str) -> str:
-    # удаляем code‑fence
-    if ln.strip().startswith("```"):
+    s = ln.strip()
+    # code‑fence
+    if s.startswith("```"):
         return ""
-    # убираем ### заголовки
+    # blockquote '>'
+    ln = BLOCKQUOTE_PAT.sub("", ln)
+    # ### заголовки
     ln = HEADER_PAT.sub("", ln)
-    # убираем маркеры списков в начале строки (-, +, •, ►, ▪ и т.п.)
+    # маркеры списков в начале строки
     ln = re.sub(rf'^\s*([{BULLET_START}])\s+', '', ln)
+    # тире-буллеты — и –
+    ln = DASH_BULLET_PAT.sub("", ln)
     return ln
 
 def sanitize_output(text: str) -> str:
@@ -200,16 +208,16 @@ def sanitize_output(text: str) -> str:
     lines = [strip_markdown_line_start(ln) for ln in text.splitlines()]
     text = "\n".join(ln for ln in lines if ln is not None)
 
-    # 2) Убираем жир/курсив Markdown: **..**, __..__, *..*, _.._
+    # 2) Жир/курсив Markdown: **..**, __..__, *..*, _.._
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text, flags=re.S)
     text = re.sub(r'__(.*?)__', r'\1', text, flags=re.S)
     text = re.sub(r'(?<!\S)\*(.+?)\*(?!\S)', r'\1', text, flags=re.S)
     text = re.sub(r'(?<!\S)_(.+?)_(?!\S)', r'\1', text, flags=re.S)
 
-    # 3) Убираем одиночные «звёздочки» и аналоги (но НЕ эмодзи-«звёзды»)
+    # 3) Любые одиночные «звёздочки»-символы и обратные апострофы
     text = re.sub(rf'[{ASTERISK_LIKE}`]+', '', text)
 
-    # 4) Сносим стартовые мета‑фразы
+    # 4) Стартовые мета‑фразы (Конечно…, Давайте…)
     text = text.strip()
     ls = text.splitlines()
     while ls:
@@ -233,34 +241,33 @@ async def send_clean(msg_or_chat, text: str, **kwargs):
 # =========================
 def system_prompt_for(lang: str) -> str:
     if lang == "ru":
-        return "Ты SmartPro 24/7. Отвечай строго на русском. Без Markdown и без «*». Обычный текст."
+        return "Ты SmartPro 24/7. Отвечай строго на русском. Без Markdown/жирного/курсива/списков. Обычный текст. Эмодзи можно."
     if lang == "he":
-        return "את/ה SmartPro 24/7. ענה אך ורק בעברית. ללא Markdown וללא כוכביות. טקסט פשוט."
-    return "You are SmartPro 24/7. Answer strictly in English. No Markdown or asterisks. Plain text."
+        return "את/ה SmartPro 24/7. ענה/עני אך ורק בעברית. בלי Markdown/הדגשות/רשימות. טקסט פשוט. אמוג׳י מותר."
+    return "You are SmartPro 24/7. Answer strictly in English. No Markdown/bold/italics/lists. Plain text. Emojis allowed."
 
 def copy_system_prompt_for(lang: str) -> str:
     if lang == "ru":
-        return "Ты опытный копирайтер. 1‑е лицо, тёплый тон. Без Markdown/«*». Без списков/заголовков. 2–4 коротких абзаца."
+        return "Ты копирайтер. 1‑е лицо, тёплый тон. Без Markdown/звёздочек/списков/заголовков. 2–4 коротких абзаца."
     if lang == "he":
-        return "את/ה קופירייטר/ית מנוסה. גוף ראשון, טון חם. בלי Markdown וכוכביות. בלי רשימות/כותרות. 2–4 פסקאות קצרות."
-    return "Experienced copywriter. First person, warm tone. No Markdown/asterisks. No lists/headings. 2–4 short paragraphs."
+        return "את/ה קופירייטר/ית. גוף ראשון, טון חם. בלי Markdown/כוכביות/רשימות/כותרות. 2–4 פסקאות קצרות."
+    return "Experienced copywriter. First person, warm tone. No Markdown/asterisks/lists/headings. 2–4 short paragraphs."
 
 def build_user_prompt(lang: str, user_text: str) -> str:
     if lang == "ru":
-        return f"Запрос пользователя: {user_text}\nДай точный, небанальный ответ по теме. Без Markdown и «*»."
+        return f"Запрос пользователя: {user_text}\nДай точный, небанальный ответ по теме. Без Markdown/жирного/курсива/списков."
     if lang == "he":
-        return f"בקשת המשתמש: {user_text}\nענה/עני תשובה מדויקת וישירה בנושא. בלי Markdown ובלי כוכביות."
-    return f"User request: {user_text}\nProvide a precise, non-generic answer. No Markdown or asterisks."
+        return f"בקשת המשתמש: {user_text}\nענה/עני תשובה מדויקת וישירה בנושא. בלי Markdown/הדגשות/רשימות."
+    return f"User request: {user_text}\nProvide a precise, non‑generic answer. No Markdown/bold/italics/lists."
 
 # =========================
-# Triggers (explicit creative only, tolerant to words in between)
+# Triggers (explicit creative only, tolerant)
 # =========================
 STORY_TRIG = re.compile(r'^\s*(напиши|сделай|сгенерируй)\b.*\b(сторис|story|инста-?сторис)\b', re.IGNORECASE | re.S)
 NARR_TRIG  = re.compile(r'^\s*(напиши|сделай|сгенерируй)\b.*\b(рассказ|эссе|сочинение|повесть|short\s+story|essay)\b', re.IGNORECASE | re.S)
 COPY_TRIG  = re.compile(r'(пост\s+приветств|приветстви[ея]\b|описани[ея]\b|био\b|bio\b)', re.IGNORECASE)
 
 def extract_topic_after_keyword(txt: str, keywords: list[str]) -> str:
-    # берём текст после ключевого слова (сторис/рассказ/…)
     pattern = re.compile(r'(' + '|'.join(map(re.escape, keywords)) + r')\b', re.IGNORECASE)
     m = pattern.search(txt)
     tail = txt[m.end():] if m else txt
@@ -309,7 +316,7 @@ async def on_menu_cmd(message: Message):
 
 @router.message(Command("version"))
 async def on_version_cmd(message: Message):
-    await send_clean(message, "UNIVERSAL GPT‑4o — HOTFIX#7b‑U8")
+    await send_clean(message, "UNIVERSAL GPT‑4o — HOTFIX#7b‑U9")
 
 @router.message(F.text.casefold() == "меню")
 @router.message(F.text.casefold() == "menu")
@@ -324,9 +331,9 @@ async def on_help(cb: CallbackQuery):
     ui = user_ui_lang[uid]
     await cb.answer("Открываю помощь…", show_alert=False)
     text = {
-        "ru": "Я универсальный помощник. Просто задайте вопрос. Сторис/рассказ — по явной просьбе. Без Markdown и «*».",
-        "en": "Universal assistant. Ask anything. Stories/narratives on explicit request. No markdown/asterisks.",
-        "he": "עוזר אוניברסלי. אפשר לשאול הכל. סטוריז/סיפור רק בבקשה מפורשת. בלי Markdown וכוכביות.",
+        "ru": "Я универсальный помощник. Просто задайте вопрос. Сторис/рассказ — по явной просьбе. Без Markdown/жирного/курсива/списков.",
+        "en": "Universal assistant. Ask anything. Stories/narratives on explicit request. No markdown/bold/italics/lists.",
+        "he": "עוזר אוניברסלי. אפשר לשאול הכל. סטוריז/סיפור רק בבקשה מפורשת. בלי Markdown/הדגשות/רשימות.",
     }.get(ui, "Я универсальный помощник. Просто задайте вопрос.")
     await send_clean(cb.message, text)
 
@@ -411,12 +418,12 @@ async def on_text(message: Message):
     text = (message.text or "").strip()
     content_lang = choose_content_lang(uid, text)
 
-    # 1) СТОРИС — явная просьба, допускаем «мне/пожалуйста» между словами
+    # 1) СТОРИС — явная просьба (допускаем слова между)
     if STORY_TRIG.match(text):
         topic = extract_topic_after_keyword(text, ["сторис", "story", "инста-сторис", "инста сторис"])
         sys = ("You are a world‑class creative writer crafting cinematic, sensory Instagram‑style stories. "
                f"Answer strictly in { 'Russian' if content_lang=='ru' else ('Hebrew' if content_lang=='he' else 'English') }. "
-               "No Markdown, no asterisks.")
+               "No Markdown, no asterisks/lists/headings.")
         prompt = (f"Тема сторис: {topic}\n"
                   f"Напиши 6–8 кинематографичных кадров (1–2 насыщенные фразы на кадр) со звуками/запахами/тактильностью, "
                   f"точными наблюдениями и сильной концовкой. Пиши на ({content_lang}). Без вступительных фраз и инструкций.")
@@ -428,7 +435,7 @@ async def on_text(message: Message):
         topic = extract_topic_after_keyword(text, ["рассказ", "эссе", "сочинение", "повесть", "short story", "essay"])
         sys = ("You are a literary writer. Produce a vivid short narrative. "
                f"Answer strictly in { 'Russian' if content_lang=='ru' else ('Hebrew' if content_lang=='he' else 'English') }. "
-               "No Markdown, no asterisks.")
+               "No Markdown, no asterisks/lists/headings.")
         prompt = (f"Тема рассказа: {topic}\n"
                   f"Напиши короткий рассказ 350–600 слов на ({content_lang}), с образностью, ритмом, сценами, диалогами по необходимости. "
                   f"Без клише и без объяснений формата.")
@@ -458,7 +465,7 @@ async def on_text(message: Message):
 # =========================
 @app.get("/version", response_class=PlainTextResponse)
 async def version():
-    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U8"
+    return "UNIVERSAL GPT‑4o — HOTFIX#7b‑U9"
 
 @app.post(WEBHOOK_PATH)
 async def tg_webhook(request: Request):
