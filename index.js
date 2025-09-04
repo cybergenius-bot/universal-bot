@@ -1,5 +1,5 @@
-// index.js — Express + Telegraf: текстовые ответы по делу, без TTS, без авто-«Меню»
-// Зависимости: express, telegraf, axios, openai
+// index.js — Express + Telegraf: только текстовые ответы, без TTS; «Меню» — только по запросу.
+// Зависимости: express, telegraf, axios (openai — опционально для реальных ответов)
 
 const express = require('express');
 const { Telegraf } = require('telegraf');
@@ -8,14 +8,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-// ENV
 const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const SECRET_TOKEN = process.env.SECRET_TOKEN || 'railway123';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const PORT = process.env.PORT || 3000;
-
-// UX режим показа клавиатуры: on_demand — меню только по запросу
-const REPLY_MENU_MODE = process.env.REPLY_MENU_MODE || 'on_demand'; // 'on_demand' | 'always'
 
 if (!BOT_TOKEN) {
   console.error('Ошибка: отсутствует BOT_TOKEN.');
@@ -25,9 +21,10 @@ if (!BOT_TOKEN) {
 const app = express();
 app.use(express.json({ limit: '20mb' }));
 
+// Бот
 const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 10000 });
 
-// Reply‑клавиатура «Меню»
+// Reply‑клавиатура «Меню» (по запросу)
 const replyKeyboard = {
   keyboard: [[{ text: 'Меню' }]],
   resize_keyboard: true,
@@ -35,14 +32,16 @@ const replyKeyboard = {
   selective: true,
 };
 
-// Утилиты
+// Санитаризация: убираем # * _ ` и цитаты/тире‑маркеры; эмодзи и 1., 2., 3. — сохраняем
 function sanitizeOutput(s) {
   return String(s)
-    .replace(/[#*_`]/g, '')      // убираем # * _ `
-    .replace(/^\s*>\s?/gm, '')   // убираем цитаты >
-    .replace(/^\s*-\s+/gm, '')   // убираем тире-маркеры
+    .replace(/[#*_`]/g, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*-\s+/gm, '')
     .trim();
 }
+
+// Детект языка: RU/HE приоритет, EN — осторожный режим
 function detectLang(ctx) {
   const lc = (ctx.from?.language_code || 'ru').toLowerCase();
   if (lc.startsWith('ru')) return 'ru';
@@ -50,52 +49,47 @@ function detectLang(ctx) {
   return 'en';
 }
 
-// Вспомогательная отправка с управлением клавиатурой
+// Отправка с управлением меню: по умолчанию — скрываем
 async function replyClean(ctx, text, { showMenu = false } = {}) {
   const cleaned = sanitizeOutput(text);
-  if (REPLY_MENU_MODE === 'always') {
-    return ctx.reply(cleaned, { reply_markup: replyKeyboard });
-  }
-  // on_demand: показать «Меню» только если явно попросили, иначе скрыть
   if (showMenu) {
     return ctx.reply(cleaned, { reply_markup: replyKeyboard });
   }
   return ctx.reply(cleaned, { reply_markup: { remove_keyboard: true } });
 }
 
-// Минимальный LLM (OpenAI при наличии ключа)
+// LLM ответ (без «эха»). Если нет OPENAI_API_KEY — аккуратный фолбэк.
 async function llmAnswer({ prompt, lang }) {
   const textPrompt = String(prompt || '').trim();
+
   if (!OPENAI_API_KEY) {
-    // Аккуратный фолбэк: компактный ответ по делу без «эха»
     if (lang === 'he') {
-      return 'Кратко: אענה תכלס לפי הבקשה, ללא חזרה על דבריך. Детали: ציין מטרה ברורה ומה צריך לקרות בסוף. Чек-лист: 1. יעד 2. מגבלות 3. 2–3 אפשרויות 4. סיכונים 5. הצעד הבא.';
+      return 'Кратко: אענה תכלס ולעניין. Детали: ציין מטרה ותוצאה רצויה. Чек-лист: 1. יעד 2. מגבלות 3. אפשרויות 4. סיכונים 5. צעד הבא.';
     }
     if (lang === 'en') {
-      return 'Brief: I will respond to the point without repeating your words. Details: specify the goal and desired outcome. Checklist: 1. Goal 2. Constraints 3. 2–3 options 4. Risks 5. Next step.';
+      return 'Brief: I will respond to the point. Details: specify goal and desired outcome. Checklist: 1. Goal 2. Constraints 3. Options 4. Risks 5. Next step.';
     }
-    return 'Кратко: отвечаю по делу без повтора вашей речи. Детали: уточните цель и желаемый результат. Чек-лист: 1. Цель 2. Ограничения 3. 2–3 варианта 4. Риски 5. Следующий шаг.';
+    return 'Кратко: отвечаю по делу. Детали: уточните цель и желаемый результат. Чек‑лист: 1. Цель 2. Ограничения 3. Варианты 4. Риски 5. Следующий шаг.';
   }
 
-  // Динамический импорт openai, чтобы не падать без пакета
   let OpenAI;
   try { ({ OpenAI } = require('openai')); } catch { OpenAI = null; }
   if (!OpenAI) {
-    return 'Кратко: модель недоступна на сервере. Детали: добавьте зависимость openai и переменную OPENAI_API_KEY. Чек-лист: 1. Установить openai 2. Указать ключ 3. Повторить запрос.';
+    return 'Кратко: модель недоступна. Детали: добавьте зависимость openai и переменную OPENAI_API_KEY.';
   }
 
   const client = new OpenAI({ apiKey: OPENAI_API_KEY });
   const sys = lang === 'he'
-    ? 'ענה תמציתי ובעניין. אל תחזור על דברי המשתמש. ללא Markdown. שמור אמוג\'י ומספור 1., 2., 3.'
+    ? 'ענה תמציתי ובעניין. אל תצטט את המשתמש. ללא סימוני Markdown. שמור על אמוג\'י ומספור 1., 2., 3.'
     : (lang === 'en'
         ? 'Reply concisely and to the point. Do not quote the user. No Markdown markers. Keep emojis and numbering 1., 2., 3.'
         : 'Отвечай кратко и по делу. Не цитируй пользователя. Без Markdown‑символов. Оставляй эмодзи и нумерацию 1., 2., 3.');
 
   const user = lang === 'he'
-    ? `בקשה: ${textPrompt}\nהשב במבנה: "Кратко:" "Детали:" "Чек-лист:" עם 1–5, בלי לצטט את הבקשה.`
+    ? `בקשה: ${textPrompt}\nהשב במבנה "Кратко:" "Детали:" "Чек-лист:" עם 1–5, בלי לצטט.`
     : (lang === 'en'
-        ? `Request: ${textPrompt}\nRespond with sections: "Кратко:" "Детали:" "Чек-лист:" with 1–5, without quoting the user.`
-        : `Запрос: ${textPrompt}\nДай ответ с блоками: "Кратко:" "Детали:" "Чек-лист:" с пунктами 1–5, без повтора речи пользователя.`);
+        ? `Request: ${textPrompt}\nRespond with sections "Кратко:" "Детали:" "Чек-лист:" (1–5), without quoting.`
+        : `Запрос: ${textPrompt}\nДай ответ блоками "Кратко:" "Детали:" "Чек‑лист:" (1–5), без повтора речи пользователя.`);
 
   try {
     const res = await client.chat.completions.create({
@@ -106,17 +100,16 @@ async function llmAnswer({ prompt, lang }) {
         { role: 'user', content: user }
       ]
     });
-    const txt = res.choices?.[0]?.message?.content || '';
-    return sanitizeOutput(txt);
+    return sanitizeOutput(res.choices?.[0]?.message?.content || '');
   } catch (e) {
     console.error('LLM error:', e?.response?.data || e.message);
-    return 'Кратко: временная ошибка генерации. Детали: повторите позже. Чек-лист: 1. Повтор 2. Короче 3. Позже 4. 5.';
+    return 'Кратко: временная ошибка генерации. Детали: повторите позже. Чек‑лист: 1. Повтор 2. Короче 3. Позже.';
   }
 }
 
-// ===== Команды и хэндлеры =====
+// ===== Команды =====
 bot.start(async (ctx) => {
-  const msg = 'Привет. Я SmartPro 24/7. Голос — без эха. Клавиатура с Меню не будет всплывать сама. Нажмите Меню, когда захотите действия.';
+  const msg = 'Привет. Я SmartPro 24/7. Голос — без эха. Клавиатура с Меню не всплывает сама. Нажмите Меню, когда нужны действия.';
   await replyClean(ctx, msg, { showMenu: true });
 });
 
@@ -125,7 +118,6 @@ bot.command('version', async (ctx) => {
 });
 
 bot.hears('Меню', async (ctx) => {
-  // Показываем «Меню» только по запросу
   const lines = [];
   lines.push('Меню:');
   lines.push('1. Голос до 10–15 сек. Без эха.');
@@ -135,27 +127,27 @@ bot.hears('Меню', async (ctx) => {
   await replyClean(ctx, lines.join('\n'), { showMenu: true });
 });
 
-// Текст: всегда письменный ответ по делу
+// ===== Текст: только письменный ответ, без инлайн‑кнопок и без всплывающего «Меню» =====
 bot.on('text', async (ctx) => {
   try {
     const lang = detectLang(ctx);
     const userText = (ctx.message.text || '').trim();
     const answer = await llmAnswer({ prompt: userText, lang });
-    await replyClean(ctx, answer); // не показываем «Меню» автоматически
+    await replyClean(ctx, answer);
   } catch (e) {
     console.error('text error:', e);
     await replyClean(ctx, 'Кратко: временная ошибка. Детали: повторите позже. Чек‑лист: 1. Короче 2. Позже 3. Поддержка.');
   }
 });
 
-// Голос: распознаём (если доступно), отвечаем ПИСЬМЕННО, без TTS и без «Озвучить ответ»
+// ===== Голос: отвечаем ПИСЬМЕННО. Инлайн‑кнопки только для расшифровки/скрыть. НИКАКОГО TTS =====
 bot.on('voice', async (ctx) => {
   try {
     const lang = detectLang(ctx);
     const v = ctx.message.voice;
-    const dur = Math.max(0, Math.min(15, v?.duration || 0));
+    const fid = v.file_unique_id || v.file_id;
 
-    // Скачиваем файл (для возможного ASR); если нет ASR — дадим ответ по делу по умолчанию
+    // Скачиваем файл; если нет ASR — дадим ответ по делу по умолчанию
     let transcript = '';
     try {
       if (OPENAI_API_KEY) {
@@ -169,7 +161,7 @@ bot.on('voice', async (ctx) => {
           w.on('finish', resolve);
           w.on('error', reject);
         });
-        // Whisper (если включён через OPENAI_API_KEY)
+        // Whisper — опционально
         let OpenAI;
         try { ({ OpenAI } = require('openai')); } catch { OpenAI = null; }
         if (OpenAI) {
@@ -187,7 +179,6 @@ bot.on('voice', async (ctx) => {
       console.error('ASR error:', err?.response?.data || err.message);
     }
 
-    // Генерируем письменный ответ без повтора речи (анти‑эхо)
     const prompt = transcript || (lang === 'he'
       ? 'בקשה קולית קצרה. תן תשובה תמציתית ורלוונטית ללא ציטוט.'
       : (lang === 'en'
@@ -195,21 +186,32 @@ bot.on('voice', async (ctx) => {
           : 'Короткий голосовой запрос. Дай ответ по делу, без повтора речи пользователя.'));
     const answer = await llmAnswer({ prompt, lang });
 
-    // Инлайн‑кнопки: только показать расшифровку (если есть) и скрыть
-    const buttons = [];
-    if (transcript) {
-      buttons.push([{ text: 'Показать расшифровку', callback_data: 'show_transcript' }]);
+    // Инлайн‑кнопки ТОЛЬКО: показать расшифровку (если есть) и скрыть
+    const inline = { inline_keyboard: [] };
+    if (transcript && transcript.trim()) {
+      inline.inline_keyboard.push([{ text: 'Показать расшифровку', callback_data: `show_transcript:${fid}` }]);
     }
-    buttons.push([{ text: 'Скрыть', callback_data: 'hide' }]);
+    inline.inline_keyboard.push([{ text: 'Скрыть', callback_data: 'hide' }]);
 
-    await ctx.reply(sanitizeOutput(answer), {
-      reply_markup: buttons.length ? { inline_keyboard: buttons } : undefined
-    });
+    await ctx.reply(sanitizeOutput(answer), { reply_markup: inline });
+    // Кэш транскрипта (простой на 15 мин — можно доработать при необходимости)
+    if (transcript) {
+      voiceTranscripts.set(fid, { text: sanitizeOutput(transcript), exp: Date.now() + 15 * 60 * 1000 });
+    }
   } catch (e) {
     console.error('voice error:', e);
     await replyClean(ctx, 'Кратко: получил голос. Детали: временная ошибка обработки. Чек‑лист: 1. Повторите позже 2. Короткое voice 3. Поддержка.');
   }
 });
+
+// Простой кэш для транскриптов (на 15 мин)
+const voiceTranscripts = new Map();
+function getTranscript(fid) {
+  const v = voiceTranscripts.get(fid);
+  if (!v) return null;
+  if (v.exp < Date.now()) { voiceTranscripts.delete(fid); return null; }
+  return v.text;
+}
 
 // Callback: показать расшифровку / скрыть
 bot.on('callback_query', async (ctx) => {
@@ -220,9 +222,11 @@ bot.on('callback_query', async (ctx) => {
       await ctx.answerCbQuery('Скрыто');
       return;
     }
-    if (data === 'show_transcript') {
-      await ctx.answerCbQuery('Готово');
-      await ctx.reply('Транскрипт доступен по кнопке при распознавании. В демо‑режиме может отсутствовать.');
+    if (data.startsWith('show_transcript:')) {
+      const fid = data.split(':')[1];
+      const text = fid ? getTranscript(fid) : null;
+      await ctx.answerCbQuery(text ? 'Готово' : 'Недоступно');
+      await replyClean(ctx, text || 'Транскрипт недоступен. Попробуйте ещё раз.');
       return;
     }
     await ctx.answerCbQuery('OK');
