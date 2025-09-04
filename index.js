@@ -1,13 +1,12 @@
-// index.js
-// SmartPro 24/7 — демо-реализация на Telegraf + Express:
-// - Одна кнопка «Меню» (ReplyKeyboard)
+// SmartPro 24/7 — демо реализация на Telegraf + Express:
+// - Одна кнопка Меню (ReplyKeyboard)
 // - Полное инлайн-меню только по запросу и закрывается кнопкой
 // - Демо-ASR и демо-TTS без расходов
 // - Анти-эхо: распознанный текст не повторяем автоматически
 // - Транскрипт только по кнопке
 // - Автоопределение языка контента с гистерезисом (2 из 3), EN не выбирается на коротких токенах
-// - Жесткая очистка Markdown-символов и маркеров
-// - Кнопки под ответом: «Показать расшифровку», «Озвучить ответ», «Скрыть»
+// - Очистка Markdown-символов и маркеров
+// - Кнопки под ответом: Показать расшифровку, Озвучить ответ, Скрыть
 
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
@@ -18,13 +17,13 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-// Конфигурация окружения (Railway)
+// Конфигурация окружения
 const TOKEN  = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET = process.env.WEBHOOK_SECRET || "railway123";
-const BASE   = process.env.BASE_URL || ""; // напр.: https://universal-bot-production.up.railway.app
+const BASE   = process.env.BASE_URL || ""; // например: https://universal-bot-production.up.railway.app
 if (!TOKEN) { console.error("ERROR: TELEGRAM_BOT_TOKEN не задан"); process.exit(1); }
 
-// Принудительно включаем демо ASR/TTS по умолчанию (можно выключить DEMO_ASR=0 / DEMO_TTS=0)
+// Принудительно включаем демо ASR/TTS (можно перекрыть DEMO_ASR=0 / DEMO_TTS=0)
 const DEMO_ASR = (process.env.DEMO_ASR ?? "1") === "1";
 const DEMO_TTS = (process.env.DEMO_TTS ?? "1") === "1";
 
@@ -39,10 +38,9 @@ const uiLang = new Map();            // user_id -> язык интерфейса
 const lastContentLangs = new Map();  // user_id -> последние 3 детекции
 const contentLang = new Map();       // user_id -> стабильный язык контента
 
-// Кэш ответов/транскриптов на 15 минут для кнопок под сообщениями
+// Кэш ответов/транскриптов на 15 минут
 const msgTextCache = new Map();  // key: chatId:msgId -> text ответа бота
 const asrCache     = new Map();  // key: chatId:msgId -> transcript
-
 function putWithTTL(map, key, value, ttlMs = 15 * 60 * 1000) {
   map.set(key, value);
   const t = setTimeout(() => map.delete(key), ttlMs);
@@ -53,7 +51,7 @@ function putWithTTL(map, key, value, ttlMs = 15 * 60 * 1000) {
 function sanitizeOutput(s) {
   if (!s) return s;
   let out = String(s);
-  out = out.replace(/[#*_`]/g, "");        // жесткая страховка
+  out = out.replace(/[#*_`]/g, "");        // страховка
   out = out.replace(/^\s*>\s?.*$/gm, "");  // блок-цитаты
   out = out.replace(/^\s*[-–—]\s+/gm, ""); // маркеры списков тире
   out = out.replace(/\r\n/g, "\n");
@@ -68,7 +66,7 @@ async function replyVoiceClean(ctx, oggPath, caption, extra = {}) {
   return ctx.replyWithVoice({ source: fs.createReadStream(oggPath) }, { caption: cap, ...extra });
 }
 
-// Локализация интерфейса (фиксируется пользователем, по умолчанию RU)
+// Локализация интерфейса
 function tUI(lang = "ru") {
   const t = {
     ru: { hello: "Привет! Я SmartPro 24/7. Нажмите Меню, когда нужно открыть действия.", ready: "Готов. Выберите действие:", ttsCaption: "Озвучено", menuTitle: "Меню действий:", saved: "Сохранено." },
@@ -78,12 +76,12 @@ function tUI(lang = "ru") {
   return t[lang] || t.ru;
 }
 
-// Единственная Reply-клавиатура — компактная кнопка «Меню»
+// Единственная Reply-клавиатура — компактная кнопка Меню
 function mainKb() {
   return Markup.keyboard([["Меню"]]).resize().oneTime(false);
 }
 
-// Инлайн-меню (открывается по запросу и закрывается кнопкой)
+// Инлайн-меню
 function buildInlineMenu() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Профиль", "m_profile"), Markup.button.callback("Справка", "m_help")],
@@ -96,7 +94,7 @@ async function showInlineMenu(ctx) {
   return sendClean(ctx, tUI(L).menuTitle, buildInlineMenu());
 }
 
-// Детект языка контента + гистерезис (2 из 3), EN не выбираем на коротких токенах
+// Детект языка контента + гистерезис, EN не выбираем на коротких
 const rx = {
   ru: /[А-Яа-яЁё]/, he: /[א-ת]/, ar: /[\u0600-\u06FF]/,
   ja: /[\u3040-\u30FF\u4E00-\u9FFF]/, ko: /[\uAC00-\uD7AF]/,
@@ -125,7 +123,7 @@ function updateContentLang(userId, candidate) {
   return contentLang.get(userId) || candidate;
 }
 
-// Демо TTS в OGG/Opus (gTTS → MP3 → ffmpeg → OGG/Opus)
+// Демо TTS в OGG/Opus
 async function ttsToOgg(text, lang = "ru") {
   const tries = lang === "he" ? ["he","iw"] : (lang === "zh" ? ["zh-CN","zh-TW"] : [lang]);
   tries.push("en","ru");
@@ -146,7 +144,7 @@ async function ttsToOgg(text, lang = "ru") {
   throw lastErr || new Error("TTS failed");
 }
 
-// Кнопки под ответом для голосовых и текстовых сообщений
+// Кнопки под ответом
 function voiceInlineKb() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Показать расшифровку", "asr_show")],
@@ -168,7 +166,7 @@ bot.command("menu", async (ctx) => showInlineMenu(ctx));
 bot.hears("Меню", async (ctx) => showInlineMenu(ctx));
 bot.action("m_close", async (ctx) => {
   try { await ctx.editMessageReplyMarkup(); } catch {}
-  await ctx.answerCbQuery("Закрыто");
+  await ctx.answerCbQuery("Скрыто");
 });
 bot.action("m_help", async (ctx) => {
   await ctx.answerCbQuery();
@@ -198,7 +196,7 @@ bot.action(["ui_ru","ui_en","ui_he"], async (ctx) => {
   await sendClean(ctx, tUI(newL).ready, buildInlineMenu());
 });
 
-// Текст: автоязык с гистерезисом, EN не выбираем на коротких
+// Текст: автоязык с гистерезисом
 bot.on("text", async (ctx, next) => {
   const uid = ctx.from.id;
   if (!uiLang.has(uid)) uiLang.set(uid, "ru");
@@ -225,7 +223,6 @@ bot.on(["voice","audio","video_note"], async (ctx) => {
   const Lui = uiLang.get(uid) || "ru";
   const Lc  = contentLang.get(uid) || Lui;
 
-  // Демо-ASR: транскрипт-заменитель, реальное ASR подключим позже
   const transcript = {
     ru: "Демо-транскрипт: распознавание в эконом-режиме.",
     he: "תמליל הדגמה: זיהוי במצב חסכוני.",
@@ -244,7 +241,7 @@ bot.on(["voice","audio","video_note"], async (ctx) => {
   if (DEMO_ASR) putWithTTL(asrCache, key, transcript);
 });
 
-// Коллбеки под сообщениями: показать расшифровку, озвучить ответ, скрыть панель
+// Коллбеки под сообщениями
 bot.action("asr_show", async (ctx) => {
   await ctx.answerCbQuery();
   const chatId = ctx.chat.id;
@@ -277,41 +274,39 @@ bot.action("v_close", async (ctx) => {
   await ctx.answerCbQuery("Скрыто");
 });
 
-// Команды /start, /version
+// Команды
 bot.command("version", async (ctx) => {
-  await sendClean(ctx, "UNIVERSAL GPT-4o — HOTFIX7b-U10");
+  await sendClean(ctx, "UNIVERSAL GPT-4o — U10c-Node");
 });
 
 // Healthcheck + вебхук
 app.get("/", (_, res) => res.status(200).send("OK"));
 app.get(`/telegram/${SECRET}`, (_, res) => res.status(200).send("Webhook OK"));
-app.get("/version", (_, res) => res.status(200).send("UNIVERSAL GPT-4o — HOTFIX7b-U10"));
+app.get("/version", (_, res) => res.status(200).send("UNIVERSAL GPT-4o — U10c-Node"));
 app.post(`/telegram/${SECRET}`, (req, res) => {
   bot.handleUpdate(req.body, res).catch(() => res.sendStatus(200));
 });
 
-// Старт сервера и (если BASE задан) установка вебхука с нужными типами апдейтов
-const PORT = process.env.PORT || 3000;
+// Старт сервера и установка вебхука
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, async () => {
   console.log(`Server on :${PORT}`);
-  try {
-    if (BASE) {
-      const url = `${BASE}/telegram/${SECRET}`;
+  if (BASE) {
+    const url = `${BASE}/telegram/${SECRET}`;
+    try {
       await bot.telegram.setWebhook(url, {
-        allowed_updates: ["message","callback_query"],
+        allowed_updates: ["message", "callback_query"],
         secret_token: SECRET
       });
       console.log("Webhook set to:", url);
-    } else {
-      // Для локальной отладки можно использовать getUpdates (но не одновременно с вебхуком)
-      // await bot.launch();
-      console.log("BASE_URL не задан. Вебхук не установлен.");
+    } catch (e) {
+      console.error("setWebhook error:", e.message);
     }
-  } catch (e) {
-    console.error("setWebhook error:", e.message);
+  } else {
+    console.log("BASE_URL не задан. Вебхук не установлен.");
   }
 });
 
-// Корректное завершение (если запускали bot.launch)
+// Корректное завершение
 process.once("SIGINT", () => { try { bot.stop("SIGINT"); } catch {} process.exit(0); });
 process.once("SIGTERM", () => { try { bot.stop("SIGTERM"); } catch {} process.exit(0); });
