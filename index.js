@@ -1,308 +1,355 @@
-// index.js — PRO: один длинный профессиональный ответ (800–1200 слов) для текста и голоса.
-// UX: только одна Reply‑кнопка «Меню» + системное «синее меню» команд Telegram; НИКАКИХ инлайн‑кнопок; TTS выключен.
-// Анти‑эхо; RU/HE приоритет, EN — осторожный режим. Санитаризация: убираем # * _ ` и цитаты/тире‑маркеры.
+/**
+ * SmartPro 24/7 (Node + Telegraf + Express)
+ * Цель: один длинный профессиональный ответ (800–1200 слов) одним сообщением, без инлайнов и без TTS,
+ *       одна Reply-кнопка «Меню» всегда видна, «синее меню» команд Telegram, анти-эхо (не цитировать пользователя),
+ *       маршруты /version, /telegram/railway123 (GET/POST), секрет для вебхука.
+ *
+ * Требуются переменные окружения:
+ *   BOT_TOKEN         — токен Telegram бота
+ *   SECRET_TOKEN      — 'railway123' (должен совпадать с вебхуком)
+ *   OPENAI_API_KEY    — ключ OpenAI (для длинных ответов по любой теме и распознавания голосовых)
+ *   PRO_MIN_WORDS     — опционально (по умолчанию 800)
+ *   PRO_MAX_WORDS     — опционально (по умолчанию 1200)
+ */
 
 const express = require('express');
-const { Telegraf } = require('telegraf');
-const axios = require('axios');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+const { Telegraf, Markup } = require('telegraf');
 
-const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const SECRET_TOKEN = process.env.SECRET_TOKEN || 'railway123';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const PORT = process.env.PORT || 3000;
 
-// Длина PRO‑ответа (можно менять переменными окружения)
 const PRO_MIN_WORDS = Number(process.env.PRO_MIN_WORDS || 800);
 const PRO_MAX_WORDS = Number(process.env.PRO_MAX_WORDS || 1200);
 
+// Ограничение Телеграма: 4096 символов. Держим запас.
+const MAX_CHARS = 3900;
+
+// Для формирования реф-ссылок
+let BOT_USERNAME = '';
+
+// Единая Reply-клавиатура (всегда видна)
+const replyKeyboard = Markup.keyboard([['Меню']]).resize().oneTime(false); // Telegraf автоматически сделает persistent для повторной отправки
+
+// Команды “синего меню”
+const BOT_COMMANDS = [
+  { command: 'start', description: 'Запуск и краткая справка' },
+  { command: 'menu', description: 'Меню и инструкции' },
+  { command: 'help', description: 'Помощь и правила ввода' },
+  { command: 'pay', description: 'Тарифы и оплата' },
+  { command: 'ref', description: 'Реферальная ссылка' },
+  { command: 'version', description: 'Версия сборки' }
+];
+
+// Инициализация бота
 if (!BOT_TOKEN) {
-  console.error('Ошибка: отсутствует BOT_TOKEN');
+  console.error('ERROR: BOT_TOKEN is missing');
   process.exit(1);
 }
+const bot = new Telegraf(BOT_TOKEN);
 
-const app = express();
-app.use(express.json({ limit: '20mb' }));
+// Установка команд и получение username
+(async () => {
+  try {
+    await bot.telegram.setMyCommands(BOT_COMMANDS);
+    const me = await bot.telegram.getMe();
+    BOT_USERNAME = me.username || '';
+    console.log('Bot username:', BOT_USERNAME);
+  } catch (e) {
+    console.error('Failed to init bot metadata:', e.message);
+  }
+})();
 
-const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 15000 });
-
-// Одна Reply‑кнопка «Меню» — всегда видна
-const replyKeyboard = {
-  keyboard: [[{ text: 'Меню' }]],
-  resize_keyboard: true,
-  one_time_keyboard: false,
-  selective: true
-};
-
-// Санитаризация: убираем # * _ ` и цитаты/тире‑маркеры; эмодзи и нумерация 1., 2., 3. — остаются
-function sanitizeOutput(s) {
-  return String(s)
-    .replace(/[#*_`]/g, '')
-    .replace(/^\s*>\s?/gm, '')
+// ===== ВСПОМОГАТЕЛЬНЫЕ =====
+function sanitizeOutput(text) {
+  if (!text) return '';
+  // Удаляем потенциальную разметку/цитаты/маркеры, оставляем цифры и эмодзи
+  let t = text
+    // убрать markdown-символы
+    .replace(/[`*_#]/g, '')
+    // убрать цитаты '>' в начале строк
+    .replace(/^\s*>[^\n]*$/gm, s => s.replace(/^>\s?/, ''))
+    // убирать тире-маркеры в начале строк
     .replace(/^\s*-\s+/gm, '')
+    // нормализуем множественные пустые строки
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+  // Одно сообщение: строго не превышаем лимит
+  if (t.length > MAX_CHARS) t = t.slice(0, MAX_CHARS - 10).trim() + '…';
+  return t;
 }
 
-// Единая отправка — всегда с Reply‑«Меню»
-async function replyClean(ctx, text) {
-  return ctx.reply(sanitizeOutput(text), { reply_markup: replyKeyboard });
+function detectLang(s) {
+  if (!s) return 'ru';
+  const hasCyr = /[А-Яа-яЁё]/.test(s);
+  const hasHeb = /[\u0590-\u05FF]/.test(s);
+  if (hasHeb) return 'he';
+  if (hasCyr) return 'ru';
+  return 'ru'; // приоритет RU, EN — осторожный режим, но фиксируем RU по умолчанию для стабильности
 }
 
-// Язык: RU/HE приоритет, EN — осторожно
-function detectLang(ctx) {
-  const lc = (ctx.from?.language_code || 'ru').toLowerCase();
-  if (lc.startsWith('ru')) return 'ru';
-  if (lc.startsWith('he')) return 'he';
-  return 'en';
+function ensureOneMessageLimit(s) {
+  if (!s) return s;
+  if (s.length <= MAX_CHARS) return s;
+  return s.slice(0, MAX_CHARS - 10).trim() + '…';
 }
 
-// Мягко дотягиваем текст до минимальной длины
-function ensureMinWords(txt, minWords) {
-  const words = txt.split(/\s+/).filter(Boolean);
-  if (words.length >= minWords) return txt;
-  const filler = [
-    'Дополнительно: уделите внимание логистике, резервам времени/бюджета и проверке решений на малых шагах.',
-    'Собирайте обратную связь и корректируйте план по результатам первых итераций.',
-    'Держите план B на случай погодных, транспортных или административных ограничений.',
-    'Оценивайте риски и влияние на смежные процессы, чтобы сохранять устойчивость всей системы.'
-  ].join(' ');
-  const extended = (txt + '\n' + filler).trim();
-  const words2 = extended.split(/\s+/).filter(Boolean);
-  if (words2.length >= minWords) return extended;
-  return extended + '\nИтог: следуя этому плану и поддерживая дисциплину, вы получите предсказуемый и качественный результат.';
+function structurePrompt(userTopic, lang = 'ru') {
+  // Без эха: используем тему, но не цитируем дословно
+  const topic = (userTopic || '').trim();
+  const minWords = PRO_MIN_WORDS;
+  const maxWords = PRO_MAX_WORDS;
+
+  // Жёсткая структура разделов
+  const instructionsRu = `
+Ты — профессиональный аналитик. Дай развёрнутый ответ ${minWords}–${maxWords} слов на русском, одним сообщением, без списков с «-», без Markdown, без цитирования вопроса и без воды. Структура строго по разделам с чёткими подзаголовками:
+1) Контекст и вводные
+2) Карта темы
+3) Практические шаги
+4) Риски и ограничения
+5) Профессиональные советы
+6) Чек-лист действий
+
+Пиши плотным деловым стилем, сохраняй законченность мысли в каждом абзаце, избегай пышной публицистики и сторителлинга, если явно не просили. Не выдавай расшифровку голоса и не повторяй формулировки пользователя.`;
+
+  return {
+    system: instructionsRu,
+    user: `Тема: ${topic || 'универсальная справка по запрошенной теме'}. Сформируй ответ по структуре.`
+  };
 }
 
-// Локальный PRO‑генератор: длинные ответы без модели (кейсы: Румыния, Молдова, Бали, Рим, «Наполеон», универсальный)
-function localProAnswer(prompt, lang) {
-  const q = String(prompt || '').toLowerCase();
+async function openaiChatAnswer(topic, lang = 'ru') {
+  // Используем fetch (Node 20+) без SDK
+  const { system, user } = structurePrompt(topic, lang);
 
-  // Бали — подробный офлайн‑ответ
-  if (q.includes('бали')) {
-    const s = [];
-    s.push('Кратко: Бали — остров в Индонезии с сильной культурной идентичностью, храмами, рисовыми террасами и разными «мирами» по районам: Убуд (культура/йога), Чангу (серф/кафе), Улувату (скалы/серф), Нуса Дуа (спокойные пляжи), север и центр (водопады/поля).');
-    s.push('Вводная и контекст. Климат тропический, сезоны: сухой (май–сентябрь) и влажный (октябрь–апрель). В высокие даты бронирования обязательны. Транспорт — скутер/такси, на дальние выезды — водитель на день.');
-    s.push('Карта темы. Культура: храмы Улувату, Танах Лот, Бесаких; обряды и танцы (кечак, легонг). Природа: рисовые террасы Тегалаланг и Джатилувих, водопады (Гит‑Гит, Секумпул), вулканы Агунг и Батур, мангровые леса и кораллы соседних Нуса‑островов.');
-    s.push('План на 5–7 дней. День 1–2: Убуд — лес обезьян, террасы, арт‑рынки, йога, масcажи. День 3: север — водопады, храм Улун Дану Бератан, озёра Бедугул. День 4: Улувату — скалы, закат, кечак; пляжи Паданг‑Паданг/Бингин. День 5: Чангу — серф‑уроки, кафе, закаты. День 6: Нуса Пенидa — Келингкинг, Broken Beach, снорклинг. День 7: релаксация/спа/кулинарный класс.');
-    s.push('Еда и быт. Локальные варунги (наси горенг, ми горенг, баби гулинг), кафе «третьей волны», фрукты по сезону. Вода — бутилированная. Местная валюта — индонезийская рупия; чаевые необязательны, но приветствуются.');
-    s.push('Практика и логистика. Страховка со скутером/серфом, солнцезащита и регидратация. Уважение к храмам: саронг, покрытые плечи. Ранние выезды на популярные точки. Сезонность волн и приливов для серфа.');
-    s.push('Риски и безопасность. Дороги узкие — защитная экипировка и внимание; береговой прибой — следите за флагами. Вулканическая активность редка, но мониторится. Берегите документы и деньги в отеле/сейфе.');
-    s.push('Бюджет и брони. Жильё от гостхаусов до вилл; трансферы/водители выгоднее брать на день. Экскурсии на Нуса — заранее. Спа и массажи — лучше в проверенных местах, сравнивайте 2–3 варианта.');
-    s.push('Советы и итог. Комбинируйте «якорные» места (храмы/водопады) с «медленными» кварталами (кафе/рынки). Учитывайте трафик и закаты. Чек‑лист: 1. Страховка 2. Бронирования 3. Скутер/водитель 4. Саронг и уважение к храмам 5. Вода и защита от солнца.');
-    return ensureMinWords(sanitizeOutput(s.join('\n')), PRO_MIN_WORDS);
-  }
+  const body = {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    temperature: 0.5,
+    max_tokens: 1400
+  };
 
-  // Румыния
-  if (q.includes('румыни')) {
-    const s = [];
-    s.push('Кратко: Румыния — динамичная страна Восточной Европы с латинскими корнями языка, сильным культурным кодом и ландшафтами от Карпат до дельты Дуная. Ниже — полный план маршрутов, логистики, рисков и советов.');
-    s.push('Карта регионов, 5–7 дней, транспорт, еда, экономика, риски, бюджет, советы и чек‑лист — см. развернутые блоки.');
-    return ensureMinWords(sanitizeOutput(s.join('\n')), PRO_MIN_WORDS);
-  }
-
-  // Молдова / Молдавия
-  if (q.includes('молдова') || q.includes('молдав')) {
-    const s = [];
-    s.push('Кратко: Республика Молдова — компактная страна с винной культурой, монастырями и неспешной провинциальной атмосферой. Ниже — маршруты, винодельни, логистика, риски и советы.');
-    s.push('Маршруты 3–4 дня, логистика авто/трансфер, гастрономия, риски, бюджет, чек‑лист — см. развернутые блоки.');
-    return ensureMinWords(sanitizeOutput(s.join('\n')), PRO_MIN_WORDS);
-  }
-
-  // Рим
-  if (q.includes('рим')) {
-    const s = [];
-    s.push('Кратко: Рим — столица мировой истории и искусства; оптимальный подход — послойно: античность, барокко/ренессанс, Ватикан, «живые» кварталы. Ниже — готовый план.');
-    s.push('Маршрут 3–4 дня, логистика, еда, ошибки, риски, советы, чек‑лист — см. развёрнутые блоки.');
-    return ensureMinWords(sanitizeOutput(s.join('\n')), PRO_MIN_WORDS);
-  }
-
-  // «Наполеон»
-  if (q.includes('наполеон')) {
-    const s = [];
-    s.push('Кратко: классический «Наполеон» — тонкие слоёные коржи и заварной крем, ночь на пропитку. Ключ: холодное масло, тонкая раскатка, температурная дисциплина.');
-    s.push('Полный список ингредиентов, технология, ошибки, советы и чек‑лист — см. развёрнутые блоки.');
-    return ensureMinWords(sanitizeOutput(s.join('\n')), PRO_MIN_WORDS);
-  }
-
-  // Универсальный PRO‑ответ
-  const s = [];
-  if (lang === 'he') {
-    s.push('Кратко: אספק תשובה ארוכה ומקצועית בהודעה אחת — רקע, מיפוי, צעדים מעשיים, סיכונים וטיפים.');
-    s.push('רקע, מיפוי נושא, תוכנית פעולה בשלבים, דוגמאות/כלים, טעויות נפוצות, זמנים/עלויות, סיכונים/בטיחות, טיפים וסיכום, עם чек‑лист בסוף.');
-  } else if (lang === 'en') {
-    s.push('Brief: A long, professional single‑message answer with context, topic map, actionable steps, risks, and tips.');
-    s.push('Background, mapping, step‑by‑step plan, examples/tools, pitfalls, time/cost, risks/safety, tips and summary, plus a final checklist.');
-  } else {
-    s.push('Кратко: один длинный профессиональный ответ — контекст, карта темы, пошаговые действия, риски, советы и чек‑лист.');
-    s.push('Структурные блоки и практические рекомендации — ниже.');
-  }
-  return ensureMinWords(sanitizeOutput(s.join('\n')), PRO_MIN_WORDS);
-}
-
-// OpenAI: длинный PRO‑ответ
-async function llmProAnswer({ prompt, lang }) {
-  if (!OPENAI_API_KEY) return localProAnswer(prompt, lang);
-
-  let OpenAI;
-  try { ({ OpenAI } = require('openai')); } catch { OpenAI = null; }
-  if (!OpenAI) return localProAnswer(prompt, lang);
-
-  const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-  const sys = lang === 'he'
-    ? `ענה תשובה ארוכה, מקצועית ומעשית (${PRO_MIN_WORDS}-${PRO_MAX_WORDS} מילים). אל תצטט את המשתמש. ללא סימוני Markdown. שמור אמוג'י ומספור 1., 2., 3.. חלק לפסקאות: רקע, מיפוי, צעדים, כלים/דוגמאות, טעויות, זמנים/עלויות, סיכונים/בטיחות, טיפים, סיכום. אם חסר מידע — ציין הנחות סבירות וענה במלואו.`
-    : (lang === 'en'
-        ? `Provide a long, professional, actionable answer (${PRO_MIN_WORDS}-${PRO_MAX_WORDS} words). Do not quote the user. No Markdown markers. Keep emojis and numbering 1., 2., 3.. Structure: background, mapping, steps, tools/examples, pitfalls, time/cost, risks/safety, tips, summary. If info is missing, state assumptions and still answer fully.`
-        : `Дай длинный профессиональный ответ ${PRO_MIN_WORDS}-${PRO_MAX_WORDS} слов. Не цитируй пользователя. Без символов Markdown. Эмодзи и нумерация 1., 2., 3. допустимы. Структура: вводная, карта темы, шаги, инструменты/примеры, ошибки, сроки/стоимость, риски/безопасность, советы, итог. Если данных не хватает — явно обозначь допущения и всё равно ответь полно.`);
-  const user = lang === 'he'
-    ? `בקשה: ${String(prompt || '')}\nספק תשובה שלמה בהודעה אחת לפי ההנחיות.`
-    : (lang === 'en'
-        ? `Request: ${String(prompt || '')}\nProvide a complete single‑message professional answer as instructed.`
-        : `Запрос: ${String(prompt || '')}\nДай один полный профессиональный ответ в соответствии с инструкцией выше.`);
-
-  try {
-    const res = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      temperature: 0.35,
-      messages: [{ role: 'system', content: sys }, { role: 'user', content: user }]
-    });
-    const txt = res.choices?.[0]?.message?.content || '';
-    return ensureMinWords(sanitizeOutput(txt), PRO_MIN_WORDS);
-  } catch {
-    return localProAnswer(prompt, lang);
-  }
-}
-
-// Whisper ASR (опционально): если есть ключ — распознаём, иначе отвечаем без транскрипта
-async function asrWhisperOgg(oggPath, lang) {
-  if (!OPENAI_API_KEY) return '';
-  let OpenAI;
-  try { ({ OpenAI } = require('openai')); } catch { OpenAI = null; }
-  if (!OpenAI) return '';
-  const client = new OpenAI({ apiKey: OPENAI_API_KEY });
-  const opts = { file: fs.createReadStream(oggPath), model: 'whisper-1' };
-  if (lang === 'ru') opts.language = 'ru';
-  if (lang === 'he') opts.language = 'he';
-  const tr = await client.audio.transcriptions.create(opts);
-  return (tr.text || '').trim();
-}
-
-// Скачиваем voice OGG
-async function downloadVoiceOgg(ctx, fileId) {
-  const f = await ctx.telegram.getFile(fileId);
-  const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${f.file_path}`;
-  const ogg = path.join(os.tmpdir(), `voice_${Date.now()}_${Math.random().toString(36).slice(2)}.ogg`);
-  const resp = await axios.get(url, { responseType: 'stream' });
-  await new Promise((resolve, reject) => {
-    const w = fs.createWriteStream(ogg);
-    resp.data.pipe(w);
-    w.on('finish', resolve);
-    w.on('error', reject);
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
   });
-  return ogg;
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`OpenAI chat error: ${res.status} ${txt}`);
+  }
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content || '';
+  return ensureOneMessageLimit(sanitizeOutput(content));
 }
 
-// ===== Команды/хэндлеры =====
+// Простой тематический фолбэк (локальные развернутые заготовки)
+function localFallback(topicRaw) {
+  const topic = (topicRaw || '').toLowerCase();
+  const base = (tName) => {
+    return [
+      `Контекст и вводные. ${tName}: кратко — ключевые особенности, историко-географические ориентиры, современная роль в регионе и мире, практическая ценность для путешественника, инвестора или релоканта.`,
+      `Карта темы. Разбейте рассмотрение на блоки: институции и право, экономика и рынки, инфраструктура и логистика, культура и язык, быт и повседневные сервисы, связи и коммуникации. Для каждого блока опишите, где искать первичные данные, на что смотреть при оценке, какие показатели критичны.`,
+      `Практические шаги. Подготовьте пошаговый план на 30–60 дней: сбор базовой информации и документов; оценка стоимости жизни и доходов; карта рисков; пилотные контакты; пробный визит или удаленный тест; финализация решения; трекер метрик и контрольные точки.`,
+      `Риски и ограничения. Разделите на регуляторные, финансовые, инфраструктурные, культурно-языковые и операционные. Для каждого риска — как обнаружить заранее, как снизить, какой план Б.`,
+      `Профессиональные советы. Опирайтесь на проверяемые источники, локальные комьюнити и первичную статистику; предпочитайте официальные реестры и витрины данных; валидируйте выводы через сравнение 2–3 независимых источников.`,
+      `Чек-лист действий. 1) Цели и критерии успеха; 2) Бюджет и сроки; 3) Документы и легализация; 4) Жилье и инфраструктура; 5) Работа/бизнес; 6) Страхование и медицина; 7) Связь и банки; 8) Сообщество и язык; 9) План адаптации; 10) Контроль и пересмотр решений.`
+    ].join('\n\n');
+  };
+
+  if (topic.includes('герман') || topic.includes('germany')) {
+    return ensureOneMessageLimit(sanitizeOutput(base('Германия')));
+  }
+  if (topic.includes('бали') || topic.includes('bali')) {
+    return ensureOneMessageLimit(sanitizeOutput(base('Бали')));
+  }
+  if (topic.includes('румыни') || topic.includes('romania')) {
+    return ensureOneMessageLimit(sanitizeOutput(base('Румыния')));
+  }
+  if (topic.includes('молдова') || topic.includes('moldova')) {
+    return ensureOneMessageLimit(sanitizeOutput(base('Молдова')));
+  }
+  if (topic.includes('рим') || topic.includes('rome')) {
+    return ensureOneMessageLimit(sanitizeOutput(base('Рим')));
+  }
+  if (topic.includes('наполеон')) {
+    return ensureOneMessageLimit(sanitizeOutput(base('Наполеон')));
+  }
+  return ensureOneMessageLimit(sanitizeOutput(base('Тема')));
+}
+
+async function generateProAnswer(topic) {
+  const lang = detectLang(topic);
+  if (OPENAI_API_KEY) {
+    try {
+      return await openaiChatAnswer(topic, lang);
+    } catch (e) {
+      console.error('OpenAI chat failed, fallback used:', e.message);
+      return localFallback(topic);
+    }
+  }
+  // Без ключа — локальный расширенный фолбэк
+  return localFallback(topic);
+}
+
+async function transcribeVoice(fileUrl) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY missing for ASR');
+  }
+  // Загружаем файл и шлём в Whisper
+  const resp = await fetch(fileUrl);
+  if (!resp.ok) throw new Error(`Cannot fetch voice file: ${resp.status}`);
+  const buf = await resp.arrayBuffer();
+  const blob = new Blob([buf], { type: 'audio/ogg' });
+
+  const form = new FormData();
+  form.append('file', blob, 'voice.ogg');
+  form.append('model', 'whisper-1');
+  form.append('response_format', 'text'); // вернёт чистый текст
+
+  const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: form
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error(`ASR error: ${r.status} ${txt}`);
+  }
+  const text = await r.text();
+  // Возвращаем распознанную тему, НО НЕ ПОКАЗЫВАЕМ её в ответе — анти-эхо
+  return (text || '').trim();
+}
+
+// ===== ОБРАБОТЧИКИ БОТА =====
+function replyOptions() {
+  return { reply_markup: replyKeyboard.reply_markup, disable_web_page_preview: true };
+}
+
+// Команды
 bot.start(async (ctx) => {
-  // Синее меню команд Telegram
-  try {
-    await bot.telegram.setMyCommands([
-      { command: 'start', description: 'Старт' },
-      { command: 'menu', description: 'Меню' },
-      { command: 'help', description: 'Помощь' },
-      { command: 'pay', description: 'Оплата' },
-      { command: 'ref', description: 'Рефералы' },
-      { command: 'version', description: 'Версия' }
-    ]);
-  } catch (_) {}
-  await replyClean(ctx, 'Привет. Я SmartPro 24/7. Снизу всегда одна кнопка «Меню». Пишите текст или отправляйте короткое voice — дам один длинный профессиональный ответ.');
+  const welcome = [
+    'SmartPro 24/7 готов. Пишите тему текстом или голосом — получите один длинный профессиональный ответ без инлайнов и без озвучки.',
+    'Всегда доступна одна Reply‑кнопка «Меню». Синее меню команд: /start, /menu, /help, /pay, /ref, /version.'
+  ].join('\n\n');
+  await ctx.reply(sanitizeOutput(welcome), replyOptions());
 });
 
 bot.command('menu', async (ctx) => {
-  const lines = [];
-  lines.push('Меню:');
-  lines.push('1. Помощь — /help');
-  lines.push('2. Оплата — /pay');
-  lines.push('3. Рефералы — /ref');
-  lines.push('4. Версия — /version');
-  lines.push('5. Старт — /start');
-  await replyClean(ctx, lines.join('\n'));
-});
-
-bot.hears('Меню', async (ctx) => {
-  // То же самое, если нажали Reply‑кнопку
-  return bot.handleUpdate({ ...ctx.update, message: { ...ctx.message, text: '/menu' } });
+  const text = [
+    'Меню',
+    '— Отправьте тему (например: «План релокации в Румынию» или «Экономика Германии для инвестора»).',
+    '— Голосовые до ~15 сек распознаются, но ответ всегда текстом в одном сообщении.',
+    '— Никаких инлайн‑кнопок. Только одна Reply‑кнопка: «Меню».'
+  ].join('\n\n');
+  await ctx.reply(sanitizeOutput(text), replyOptions());
 });
 
 bot.command('help', async (ctx) => {
-  const t = 'Помощь: я отвечаю одним профессиональным сообщением 800–1200 слов. Голос — без «эха», TTS выключен. Команды: /menu /pay /ref /version /start.';
-  await replyClean(ctx, t);
+  const text = [
+    'Как получить лучший ответ:',
+    '1) Сформулируйте фокус (цель, срок, ограничения).',
+    '2) Уточните контекст (страна/город, бюджет, формат — туризм/релокация/бизнес).',
+    '3) Попросите конкретную структуру или чек‑лист, если нужно.',
+    'Ответ придёт одним длинным сообщением, без цитирования вопроса и без «расшифровок».'
+  ].join('\n\n');
+  await ctx.reply(sanitizeOutput(text), replyOptions());
 });
 
 bot.command('pay', async (ctx) => {
-  const t = 'Оплата: тарифы будут подключены позже. Сейчас режим PRO‑ответов активен для текста и голоса.';
-  await replyClean(ctx, t);
+  const text = [
+    'Тарифы (демо): 10 / 20 / 50 USD.',
+    'Оплата подключается после стабилизации ядра. Сейчас доступна полная функциональность в тестовом режиме.'
+  ].join('\n\n');
+  await ctx.reply(sanitizeOutput(text), replyOptions());
 });
 
 bot.command('ref', async (ctx) => {
   const uid = ctx.from?.id || 0;
-  const link = `t.me/${ctx.me}?start=ref_${uid}`;
-  const t = `Рефералы: приглашайте по ссылке ${link}. Бонусы будут начисляться после подключения оплаты.`;
-  await replyClean(ctx, t);
+  const link = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=ref_${uid}` : 'Ссылка будет доступна после инициализации бота';
+  const text = `Ваша персональная реф‑ссылка:\n${link}`;
+  await ctx.reply(sanitizeOutput(text), replyOptions());
 });
 
 bot.command('version', async (ctx) => {
-  await replyClean(ctx, 'UNIVERSAL GPT-4o — U10c-Node');
+  await ctx.reply('UNIVERSAL GPT‑4o — U10c‑Node', replyOptions());
 });
 
-// Текст → длинный PRO‑ответ
+// Текстовые запросы
 bot.on('text', async (ctx) => {
   try {
-    const lang = detectLang(ctx);
-    const q = (ctx.message.text || '').trim();
-    const a = await llmProAnswer({ prompt: q, lang });
-    await replyClean(ctx, a);
-  } catch {
-    await replyClean(ctx, 'Кратко: временная ошибка. Детали: повторите позже. Чек‑лист: 1. Повтор 2. Короче 3. Позже.');
+    const text = (ctx.message?.text || '').trim();
+    if (!text || text === 'Меню') {
+      return ctx.reply('Выберите действие или напишите тему запроса. Команды: /menu /help /pay /ref /version', replyOptions());
+    }
+    // Генерация длинного PRO‑ответа без эха
+    const answer = await generateProAnswer(text);
+    await ctx.reply(answer, replyOptions());
+  } catch (e) {
+    console.error('text handler error:', e.message);
+    await ctx.reply('Временная ошибка обработки. Повторите запрос текстом.', replyOptions());
   }
 });
 
-// Голос → (ASR если есть) → длинный PRO‑ответ без «эха»
+// Голосовые: распознаём (если есть ключ), отвечаем длинным текстом, без показа транскрипта
 bot.on('voice', async (ctx) => {
   try {
-    const lang = detectLang(ctx);
-    let transcript = '';
-    try {
-      const ogg = await downloadVoiceOgg(ctx, ctx.message.voice.file_id);
-      try { transcript = await asrWhisperOgg(ogg, lang); } finally { try { fs.unlinkSync(ogg); } catch {} }
-    } catch { /* демо без ASR */ }
+    const fileId = ctx.message?.voice?.file_id;
+    if (!fileId) return;
 
-    const prompt = transcript && transcript.trim()
-      ? transcript.trim()
-      : (lang === 'he'
-          ? 'בקשה קולית כללית. ספק תשובה מקצועית מלאה בנושא המבוקש, בהודעה אחת.'
-          : (lang === 'en'
-              ? 'General voice request. Provide a full professional single-message answer on the likely topic.'
-              : 'Общий голосовой запрос. Дай один полный профессиональный ответ по вероятной теме одним сообщением.'));
-    const a = await llmProAnswer({ prompt, lang });
-    await replyClean(ctx, a);
-  } catch {
-    await replyClean(ctx, 'Кратко: получил голос. Детали: временная ошибка обработки. Чек‑лист: 1. Повторите позже 2. Короткое voice 3. Поддержка.');
+    let topic = '';
+    try {
+      const link = await ctx.telegram.getFileLink(fileId);
+      topic = await transcribeVoice(link.href);
+    } catch (asrErr) {
+      console.error('ASR failed:', asrErr.message);
+      // Если нет ключа или ошибка ASR — просим дублировать текстом
+      return ctx.reply('Я получил голосовое. Распознавание сейчас недоступно. Пожалуйста, отправьте тему текстом.', replyOptions());
+    }
+
+    const answer = await generateProAnswer(topic || 'Пожалуйста, сформулируйте тему запроса.');
+    await ctx.reply(answer, replyOptions());
+  } catch (e) {
+    console.error('voice handler error:', e.message);
+    await ctx.reply('Не удалось обработать голосовое. Отправьте тему текстом.', replyOptions());
   }
 });
 
-// ===== HTTP =====
-app.get('/version', (req, res) => res.status(200).send('UNIVERSAL GPT-4o — U10c-Node'));
-app.get('/telegram/railway123', (req, res) => res.status(200).send('Webhook OK'));
-app.post('/telegram/railway123', (req, res, next) => {
-  const got = req.get('x-telegram-bot-api-secret-token');
-  if (SECRET_TOKEN && got !== SECRET_TOKEN) return res.status(401).send('Unauthorized');
-  return next();
-}, bot.webhookCallback('/telegram/railway123'));
-app.get('/', (req, res) => res.status(200).send('OK'));
+// ===== ВЕБ-СЕРВЕР И ВЕБХУК =====
+const app = express();
+app.use(express.json());
+
+// Быстрая проверка версии
+app.get('/version', (req, res) => {
+  res.type('text/plain').send('UNIVERSAL GPT‑4o — U10c‑Node');
+});
+
+// Проверка, что отвечает Node
+app.get('/telegram/railway123', (req, res) => {
+  res.type('text/plain').send('Webhook OK');
+});
+
+// Приём вебхука Telegram с проверкой секретного заголовка
+app.post('/telegram/railway123', (req, res) => {
+  const secret = req.headers['x-telegram-bot-api-secret-token'];
+  if (!secret || secret !== SECRET_TOKEN) {
+    return res.status(401).send('Unauthorized');
+  }
+  bot.handleUpdate(req.body, res).catch((err) => {
+    console.error('handleUpdate error:', err);
+    res.status(200).send('OK'); // Телеграму отвечаем 200, чтобы не ретраился
+  });
+});
 
 app.listen(PORT, () => {
-  console.log('Server started on port', PORT);
-  console.log('GET /version → 200');
-  console.log('GET /telegram/railway123 → Webhook OK');
+  console.log(`Server listening on :${PORT}`);
 });
