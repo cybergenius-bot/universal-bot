@@ -2,7 +2,7 @@ FROM node:20-slim
 ENV NODE_ENV=production
 WORKDIR /app
 
-# ffmpeg для ASR/TTS и certs
+# ffmpeg для ASR/TTS и сертификаты
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Устанавливаем зависимости
