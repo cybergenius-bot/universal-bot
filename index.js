@@ -1,16 +1,15 @@
 /**
- * SmartPro 24/7 (U10e-Node)
- * Длинный профессиональный ответ (800–1200 слов) одним сообщением, без инлайнов и без TTS.
- * Всегда одна Reply‑кнопка «Меню» (is_persistent). Автодетект языка (RU/HE приоритет; EN — осторожный режим).
- * Анти‑эхо, чистый текст. Маршруты: GET /version, GET /telegram/railway123, POST /telegram/railway123.
- * Вебхук: проверка x-telegram-bot-api-secret-token.
+ * SmartPro 24/7 (U10f-Node)
+ * Длинный PRO-ответ (800–1200 слов) одним сообщением, без инлайнов и без TTS.
+ * Постоянная Reply‑кнопка «Меню», анти‑эхо, автодетект RU/HE (EN — осторожно).
+ * Асинхронный вебхук (нет таймаутов), жёсткие таймауты на OpenAI с фолбэком.
+ * Маршруты: GET /version, GET /telegram/railway123, POST /telegram/railway123 (секрет заголовок).
  *
  * ENV:
  *   BOT_TOKEN (required)
- *   SECRET_TOKEN=railway123 (required; совпадает с secret_token в setWebhook)
- *   OPENAI_API_KEY (optional, для длинных ответов по любой теме и ASR)
- *   PRO_MIN_WORDS=800 (optional)
- *   PRO_MAX_WORDS=1200 (optional)
+ *   SECRET_TOKEN=railway123 (required)
+ *   OPENAI_API_KEY (optional — для длинных ответов и ASR)
+ *   PRO_MIN_WORDS=800, PRO_MAX_WORDS=1200 (optional)
  */
 
 const express = require('express');
@@ -23,7 +22,7 @@ const PORT = process.env.PORT || 3000;
 
 const PRO_MIN_WORDS = Number(process.env.PRO_MIN_WORDS || 800);
 const PRO_MAX_WORDS = Number(process.env.PRO_MAX_WORDS || 1200);
-const MAX_CHARS = 3900; // запас до лимита 4096
+const MAX_CHARS = 3900; // запас под 4096 Телеграм
 
 if (!BOT_TOKEN) {
   console.error('ERROR: BOT_TOKEN is missing');
@@ -31,10 +30,9 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
-// Критично: не отвечать в HTTP-ответе вебхука, чтобы избежать таймаутов
-bot.webhookReply = false;
+bot.webhookReply = false; // не отвечаем в HTTP вебхука
 
-// ——— Параметры клавиатуры «Меню» (постоянная) ———
+// Постоянная клавиатура «Меню»
 const replyKeyboard = {
   keyboard: [[{ text: 'Меню' }]],
   resize_keyboard: true,
@@ -44,7 +42,7 @@ const replyKeyboard = {
 };
 const replyOptions = { reply_markup: replyKeyboard, disable_web_page_preview: true };
 
-// ——— Синие команды ———
+// Синие команды
 const BOT_COMMANDS = [
   { command: 'start', description: 'Запуск и краткая справка' },
   { command: 'menu', description: 'Меню и инструкции' },
@@ -80,12 +78,10 @@ function sanitizeOutput(text) {
   if (t.length > MAX_CHARS) t = t.slice(0, MAX_CHARS - 10).trim() + '…';
   return t;
 }
-
 function ensureOneMessageLimit(s) {
   if (!s) return s;
   return s.length <= MAX_CHARS ? s : s.slice(0, MAX_CHARS - 10).trim() + '…';
 }
-
 function detectLang(s) {
   if (!s) return 'ru';
   const hasCyr = /[А-Яа-яЁё]/.test(s);
@@ -93,6 +89,20 @@ function detectLang(s) {
   if (hasHeb) return 'he';
   if (hasCyr) return 'ru';
   return 'ru';
+}
+
+// Общая обвязка таймаута для fetch
+async function withTimeout(promise, ms, onAbortMsg = 'timeout') {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await promise(controller.signal);
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(onAbortMsg);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function structurePrompt(userTopic) {
@@ -114,6 +124,7 @@ function structurePrompt(userTopic) {
 }
 
 async function openaiChatAnswer(topic) {
+  if (!OPENAI_API_KEY) throw new Error('no_openai_key');
   const { system, user } = structurePrompt(topic);
   const body = {
     model: 'gpt-4o-mini',
@@ -122,87 +133,98 @@ async function openaiChatAnswer(topic) {
       { role: 'user', content: user }
     ],
     temperature: 0.5,
-    max_tokens: 1100
+    max_tokens: 1200
   };
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  });
+  const doFetch = (signal) =>
+    fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      signal
+    });
+
+  const res = await withTimeout(doFetch, 12000, 'openai_chat_timeout');
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
-    throw new Error(`OpenAI chat error: ${res.status} ${txt}`);
+    throw new Error(`openai_chat_http_${res.status}: ${txt}`);
   }
   const data = await res.json();
   const content = data?.choices?.[0]?.message?.content || '';
   return ensureOneMessageLimit(sanitizeOutput(content));
 }
 
+// Локальные развёрнутые фолбэки
 function localFallback(topicRaw) {
-  const topic = (topicRaw || '').toLowerCase();
-  const base = (tName) => {
-    return [
-      `Контекст и вводные. ${tName}: кратко — ключевые особенности, историко-географические ориентиры, современная роль в регионе и мире, практическая ценность для путешественника, инвестора или релоканта.`,
-      `Карта темы. Разбейте рассмотрение на блоки: институции и право, экономика и рынки, инфраструктура и логистика, культура и язык, быт и повседневные сервисы, связи и коммуникации. Для каждого блока опишите, где искать первичные данные, на что смотреть при оценке, какие показатели критичны.`,
-      `Практические шаги. Подготовьте пошаговый план на 30–60 дней: сбор базовой информации и документов; оценка стоимости жизни и доходов; карта рисков; пилотные контакты; пробный визит или удаленный тест; финализация решения; трекер метрик и контрольные точки.`,
-      `Риски и ограничения. Разделите на регуляторные, финансовые, инфраструктурные, культурно-языковые и операционные. Для каждого риска — как обнаружить заранее, как снизить, какой план Б.`,
-      `Профессиональные советы. Опирайтесь на проверяемые источники, локальные комьюнити и первичную статистику; предпочитайте официальные реестры и витрины данных; валидируйте выводы через сравнение 2–3 независимых источников.`,
-      `Чек-лист действий. 1) Цели и критерии успеха; 2) Бюджет и сроки; 3) Документы и легализация; 4) Жилье и инфраструктура; 5) Работа/бизнес; 6) Страхование и медицина; 7) Связь и банки; 8) Сообщество и язык; 9) План адаптации; 10) Контроль и пересмотр решений.`
-    ].join('\n\n');
-  };
-  if (topic.includes('герман') || topic.includes('germany')) return ensureOneMessageLimit(sanitizeOutput(base('Германия')));
-  if (topic.includes('бали') || topic.includes('bali')) return ensureOneMessageLimit(sanitizeOutput(base('Бали')));
-  if (topic.includes('румыни') || topic.includes('romania')) return ensureOneMessageLimit(sanitizeOutput(base('Румыния')));
-  if (topic.includes('молдова') || topic.includes('moldova')) return ensureOneMessageLimit(sanitizeOutput(base('Молдова')));
-  if (topic.includes('рим') || topic.includes('rome')) return ensureOneMessageLimit(sanitizeOutput(base('Рим')));
-  if (topic.includes('наполеон')) return ensureOneMessageLimit(sanitizeOutput(base('Наполеон')));
+  const q = (topicRaw || '').toLowerCase();
+  const base = (name) => [
+    `Контекст и вводные. ${name}: ключевые историко-географические ориентиры, современная роль в регионе и мире, что важно для путешественника, инвестора или релоканта.`,
+    `Карта темы. Институции и право; экономика и рынки; инфраструктура и логистика; культура и язык; быт и сервисы; связь и цифровая среда. Для каждого блока — где искать первичные данные, на что смотреть и какие метрики критичны.`,
+    `Практические шаги. Дорожная карта на 30–60 дней: сбор базовой информации и документов; оценка стоимости жизни и доходов; карта рисков; пилотные контакты; пробный визит/удалённый тест; финализация решения; трекер метрик и контрольные точки.`,
+    `Риски и ограничения. Регуляторные, финансовые, инфраструктурные, культурно-языковые и операционные. Для каждого — как обнаружить заранее, как снизить, какой план Б.`,
+    `Профессиональные советы. Смотреть на первичные источники, официальные реестры и открытые данные; валидировать выводы через 2–3 независимых источника; опираться на локальные комьюнити.`,
+    `Чек‑лист действий. 1) Цели и критерии успеха; 2) Бюджет и сроки; 3) Документы и легализация; 4) Жильё и инфраструктура; 5) Работа/бизнес; 6) Страхование и медицина; 7) Связь и банки; 8) Сообщество и язык; 9) План адаптации; 10) Контроль и пересмотр решений.`
+  ].join('\n\n');
+
+  if (q.includes('герман') || q.includes('germany')) return ensureOneMessageLimit(sanitizeOutput(base('Германия')));
+  if (q.includes('бали') || q.includes('bali')) return ensureOneMessageLimit(sanitizeOutput(base('Бали')));
+  if (q.includes('румыни') || q.includes('romania')) return ensureOneMessageLimit(sanitizeOutput(base('Румыния')));
+  if (q.includes('молдова') || q.includes('moldova')) return ensureOneMessageLimit(sanitizeOutput(base('Молдова')));
+  if (q.includes('рим') || q.includes('rome')) return ensureOneMessageLimit(sanitizeOutput(base('Рим')));
+  if (q.includes('наполеон')) return ensureOneMessageLimit(sanitizeOutput(base('Наполеон')));
+  // Беларусь / Белоруссия
+  if (q.includes('беларус') || q.includes('белорусс') || q.includes('belarus')) return ensureOneMessageLimit(sanitizeOutput(base('Беларусь')));
   return ensureOneMessageLimit(sanitizeOutput(base('Тема')));
 }
 
 async function generateProAnswer(topic) {
-  if (OPENAI_API_KEY) {
-    try { return await openaiChatAnswer(topic); }
-    catch (e) {
-      console.error('OpenAI chat failed, fallback used:', e.message);
-      return localFallback(topic);
-    }
+  // 1) Пробуем OpenAI с таймаутом; 2) При любой ошибке — локальный развёрнутый фолбэк
+  try {
+    return await openaiChatAnswer(topic);
+  } catch (e) {
+    console.error('OpenAI failed:', e.message);
+    return localFallback(topic);
   }
-  return localFallback(topic);
 }
 
 async function transcribeVoice(fileUrl) {
-  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing for ASR');
-  const resp = await fetch(fileUrl);
-  if (!resp.ok) throw new Error(`Cannot fetch voice file: ${resp.status}`);
+  if (!OPENAI_API_KEY) throw new Error('no_openai_key_asr');
+  const doFetchFile = (signal) => fetch(fileUrl, { signal });
+  const resp = await withTimeout(doFetchFile, 12000, 'asr_file_timeout');
+  if (!resp.ok) throw new Error(`asr_file_http_${resp.status}`);
   const buf = await resp.arrayBuffer();
   const blob = new Blob([buf], { type: 'audio/ogg' });
   const form = new FormData();
   form.append('file', blob, 'voice.ogg');
   form.append('model', 'whisper-1');
   form.append('response_format', 'text');
-  const r = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-    body: form
-  });
+
+  const doAsr = (signal) =>
+    fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: form,
+      signal
+    });
+
+  const r = await withTimeout(doAsr, 12000, 'asr_timeout');
   if (!r.ok) {
     const txt = await r.text().catch(() => '');
-    throw new Error(`ASR error: ${r.status} ${txt}`);
+    throw new Error(`asr_http_${r.status}: ${txt}`);
   }
   const text = await r.text();
   return (text || '').trim();
 }
 
-// ——— Логирование и отлов ошибок ———
+// Логирование
 bot.use(async (ctx, next) => {
   try {
     const t = ctx.updateType;
     const msg = ctx.message || ctx.update?.message;
-    const info = msg?.text ? `text="${msg.text}"` : (msg?.voice ? 'voice' : '');
-    console.log(`[update] type=${t} chat=${msg?.chat?.id} user=${msg?.from?.id} ${info}`);
+    const info = msg?.text ? `text="${(msg.text || '').slice(0,120)}"` : (msg?.voice ? `voice_dur=${msg.voice.duration}s` : '');
+    console.log(`[update] ${t} chat=${msg?.chat?.id} user=${msg?.from?.id} ${info}`);
   } catch {}
   return next();
 });
@@ -210,20 +232,18 @@ bot.use(async (ctx, next) => {
 bot.catch((err, ctx) => {
   console.error('Telegraf error:', err);
   if (ctx?.chat?.id) {
-    // Мягко уведомим о сбое и одновременно вернём клавиатуру
     ctx.reply('Временная ошибка. Повторите запрос текстом.', replyOptions).catch(() => {});
   }
 });
 
-// ——— Команды ———
+// Команды
 bot.start(async (ctx) => {
   const welcome = [
     'SmartPro 24/7 готов. Пишите тему текстом или голосом — получите один длинный профессиональный ответ без инлайнов и без озвучки.',
-    'Всегда доступна одна Reply‑кнопка «Меню». Синее меню команд: /start, /menu, /help, /pay, /ref, /version.'
+    'Всегда доступна одна Reply‑кнопка «Меню». Синее меню команд: /start, /menu, /help, /pay, /ref, /version, /debug.'
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(welcome), replyOptions);
 });
-
 bot.command('menu', async (ctx) => {
   const text = [
     'Меню',
@@ -233,7 +253,6 @@ bot.command('menu', async (ctx) => {
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(text), replyOptions);
 });
-
 bot.command('help', async (ctx) => {
   const text = [
     'Как получить лучший ответ:',
@@ -244,7 +263,6 @@ bot.command('help', async (ctx) => {
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(text), replyOptions);
 });
-
 bot.command('pay', async (ctx) => {
   const text = [
     'Тарифы (демо): 10 / 20 / 50 USD.',
@@ -252,51 +270,40 @@ bot.command('pay', async (ctx) => {
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(text), replyOptions);
 });
-
 bot.command('ref', async (ctx) => {
   const uid = ctx.from?.id || 0;
   const link = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=ref_${uid}` : 'Ссылка будет доступна после инициализации бота';
   const text = `Ваша персональная реф‑ссылка:\n${link}`;
   await ctx.reply(sanitizeOutput(text), replyOptions);
 });
-
 bot.command('version', async (ctx) => {
-  await ctx.reply('UNIVERSAL GPT‑4o — U10e-Node', replyOptions);
+  await ctx.reply('UNIVERSAL GPT‑4o — U10f-Node', replyOptions);
 });
-
 bot.command('debug', async (ctx) => {
   try {
     const info = await bot.telegram.getWebhookInfo();
     const masked = {
       url: info.url,
-      has_custom_certificate: info.has_custom_certificate,
+      allowed_updates: info.allowed_updates,
       pending_update_count: info.pending_update_count,
-      ip_address: info.ip_address,
       last_error_date: info.last_error_date,
       last_error_message: info.last_error_message,
-      max_connections: info.max_connections,
-      allowed_updates: info.allowed_updates,
       secret_token_set: Boolean(SECRET_TOKEN),
-      openai_key_present: OPENAI_API_KEY ? true : false,
-      version: 'U10e-Node'
+      openai_key_present: !!OPENAI_API_KEY,
+      version: 'U10f-Node'
     };
-    await ctx.reply('DEBUG:\n' + '```json\n' + JSON.stringify(masked, null, 2) + '\n```', {
-      ...replyOptions,
-      parse_mode: 'MarkdownV2' // только для блока кода в debug
-    }).catch(async () => {
-      await ctx.reply(JSON.stringify(masked, null, 2), replyOptions);
-    });
+    await ctx.reply(JSON.stringify(masked, null, 2), replyOptions);
   } catch (e) {
     await ctx.reply('DEBUG error: ' + e.message, replyOptions);
   }
 });
 
-// ——— Текст ———
+// Текст
 bot.on('text', async (ctx) => {
   try {
     const text = (ctx.message?.text || '').trim();
     if (!text || text === 'Меню') {
-      return ctx.reply('Выберите действие или напишите тему запроса. Команды: /menu /help /pay /ref /version', replyOptions);
+      return ctx.reply('Выберите действие или напишите тему запроса. Команды: /menu /help /pay /ref /version /debug', replyOptions);
     }
     const answer = await generateProAnswer(text);
     await ctx.reply(answer, replyOptions);
@@ -306,7 +313,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// ——— Голос ———
+// Голос
 bot.on('voice', async (ctx) => {
   try {
     const fileId = ctx.message?.voice?.file_id;
@@ -328,13 +335,13 @@ bot.on('voice', async (ctx) => {
   }
 });
 
-// ——— Веб-сервер и вебхук ———
+// Веб-сервер и вебхук
 const app = express();
 app.use(express.json());
 
 // Быстрая проверка версии
 app.get('/version', (req, res) => {
-  res.type('text/plain').send('UNIVERSAL GPT‑4o — U10e-Node');
+  res.type('text/plain').send('UNIVERSAL GPT‑4o — U10f-Node');
 });
 
 // Проверка, что отвечает Node
@@ -342,7 +349,7 @@ app.get('/telegram/railway123', (req, res) => {
   res.type('text/plain').send('Webhook OK');
 });
 
-// Вебхук. Сразу 200 OK, обработка — асинхронно
+// Асинхронный вебхук: сразу 200 OK, обработка — в фоне
 app.post('/telegram/railway123', (req, res) => {
   const secret = req.headers['x-telegram-bot-api-secret-token'];
   if (!secret || secret !== SECRET_TOKEN) {
