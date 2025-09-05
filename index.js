@@ -1,18 +1,9 @@
 /**
- * SmartPro 24/7 (U11-Node)
- * — Длинные профессиональные ответы одним сообщением (без инлайнов и без TTS).
- * — Одна постоянная Reply‑кнопка «Меню» всегда видна.
- * — «Синее меню» команд: /start /menu /help /pay /ref /version.
- * — Голосовые распознаются (Whisper) при наличии OPENAI_API_KEY; ответ всегда текстом в одном сообщении.
- * — Вебхук асинхронный, секрет в заголовке x-telegram-bot-api-secret-token.
- * — Маршруты: GET /version, GET /telegram/railway123, POST /telegram/railway123.
- *
- * ENV (Railway → Variables):
- *   BOT_TOKEN          — обязателен
- *   SECRET_TOKEN       — 'railway123' (должен совпадать с secret_token при setWebhook)
- *   OPENAI_API_KEY     — опционально (для проф. ответов на любую тему и для распознавания голосовых)
- *   PRO_MIN_WORDS      — опционально (по умолчанию 800)
- *   PRO_MAX_WORDS      — опционально (по умолчанию 1200)
+ * SmartPro 24/7 (U11b-Node)
+ * — Один длинный профессиональный ответ одним сообщением. Без инлайнов. TTS отключён.
+ * — Одна постоянная Reply‑кнопка «Меню». «Синее меню»: /start /menu /help /pay /ref /version /debug.
+ * — Голос распознаём при OPENAI_API_KEY (Whisper), но отвечаем всегда текстом (анти‑эхо).
+ * — Асинхронный вебхук + “typing” во время генерации + таймауты и гарантированный фолбэк.
  */
 
 const express = require('express');
@@ -25,7 +16,7 @@ const PORT = process.env.PORT || 3000;
 
 const PRO_MIN_WORDS = Number(process.env.PRO_MIN_WORDS || 800);
 const PRO_MAX_WORDS = Number(process.env.PRO_MAX_WORDS || 1200);
-const MAX_CHARS = 3900; // запас до лимита 4096
+const MAX_CHARS = 3900; // запас под лимит 4096
 
 if (!BOT_TOKEN) {
   console.error('ERROR: BOT_TOKEN is missing');
@@ -33,9 +24,9 @@ if (!BOT_TOKEN) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
-bot.webhookReply = false; // отвечаем асинхронно (исключает таймауты Telegram)
+bot.webhookReply = false; // критично: не отвечаем в HTTP вебхука
 
-// ——— Постоянная Reply‑клавиатура «Меню» (без инлайнов) ———
+// ——— Постоянная Reply‑клавиатура ———
 const replyKeyboard = {
   keyboard: [[{ text: 'Меню' }]],
   resize_keyboard: true,
@@ -45,14 +36,15 @@ const replyKeyboard = {
 };
 const replyOptions = { reply_markup: replyKeyboard, disable_web_page_preview: true };
 
-// ——— «Синее меню» команд ———
+// ——— Команды ———
 const BOT_COMMANDS = [
   { command: 'start', description: 'Запуск и краткая справка' },
   { command: 'menu', description: 'Меню и инструкции' },
   { command: 'help', description: 'Помощь и правила ввода' },
   { command: 'pay', description: 'Тарифы и оплата' },
   { command: 'ref', description: 'Реферальная ссылка' },
-  { command: 'version', description: 'Версия сборки' }
+  { command: 'version', description: 'Версия сборки' },
+  { command: 'debug', description: 'Диагностика вебхука и окружения' }
 ];
 
 let BOT_USERNAME = '';
@@ -71,10 +63,10 @@ let BOT_USERNAME = '';
 function sanitizeOutput(text) {
   if (!text) return '';
   let t = text
-    .replace(/[`*_#]/g, '')                 // убрать markdown-символы
+    .replace(/[`*_#]/g, '')                // убрать markdown-символы
     .replace(/^\s*>[^\n]*$/gm, s => s.replace(/^>\s?/, '')) // убрать цитаты
-    .replace(/^\s*-\s+/gm, '')              // убрать тире-маркеры
-    .replace(/\n{3,}/g, '\n\n')             // нормализация пустых строк
+    .replace(/^\s*-\s+/gm, '')             // убрать тире-маркеры
+    .replace(/\n{3,}/g, '\n\n')            // нормализовать пустые строки
     .trim();
   if (t.length > MAX_CHARS) t = t.slice(0, MAX_CHARS - 10).trim() + '…';
   return t;
@@ -95,8 +87,7 @@ async function withTimeout(promiseFactory, ms, name = 'timeout') {
     clearTimeout(timer);
   }
 }
-
-// «Пишет…» пока формируется ответ (UX-индикатор)
+// «Печатает…» пока готовим ответ
 function startTyping(ctx) {
   const chatId = ctx.chat.id;
   let stopped = false;
@@ -106,24 +97,22 @@ function startTyping(ctx) {
   return () => { stopped = true; clearInterval(h); };
 }
 
-// ——— Универсальный промпт: модель сама выбирает формат под намерение ———
+// ——— Универсальная модельная инструкция ———
 function buildIntentPrompt(userTopic) {
   const topic = (userTopic || '').trim();
   const minW = PRO_MIN_WORDS;
   const maxW = PRO_MAX_WORDS;
-
   const system = `
-Ты — профессиональный ассистент. Сам определяй намерение пользователя и выбирай формат ответа. 
+Ты — профессиональный ассистент. Сам определяй намерение пользователя и выбирай формат ответа.
 Всегда отвечай одним сообщением на русском (если явно не указано иное), без Markdown и без тире‑списков, деловой плотный стиль, полные абзацы. Объём ${minW}–${maxW} слов. Не цитируй вопрос и избегай «воды».
 
-Строгие правила выбора формата:
-1) Кулинария/рецепт: технологическая карта с инвентарём, точными ингредиентами (г/мл/шт), пошаговой термообработкой (температуры/время), таймингом/выходом/хранением, «частые ошибки и их исправление». Истории блюда не писать.
-2) Страны/города/релокация/бизнес/анализ: разделы «Контекст», «Карта темы», «Практические шаги», «Риски», «Проф. советы», «Чек‑лист».
+Правила выбора формата:
+1) Кулинария/рецепт: технологическая карта с инвентарём, точными ингредиентами (г/мл/шт), пошаговой термообработкой (температуры/время), таймингом/выходом/хранением, «частые ошибки и исправление». Историю блюда не писать.
+2) Аналитика (страны/город/бизнес/релокация): «Контекст», «Карта темы», «Практические шаги», «Риски», «Проф. советы», «Чек‑лист».
 3) План/проект/обучение: цель, этапы, риски, метрики, критерии готовности, точки контроля.
 4) Правила/процедуры/документы: требования, шаги, сроки, исключения, контрольные точки.
 5) Сравнение/выбор: критерии, текстовая таблица (без Markdown), рекомендации, итог, условия пересмотра.
 6) Если запрос неоднозначен: кратко обозначь 2–3 трактовки и ответь по наиболее вероятной.`;
-
   const user = `Тема: ${topic || 'универсальная тема'}. Сформируй ответ строго по правилам.`;
   return { system, user };
 }
@@ -159,21 +148,22 @@ async function openaiChatAnswer(topic) {
   return ensureOneMessageLimit(sanitizeOutput(content));
 }
 
-// Универсальный фолбэк без доменных заготовок (на случай отсутствия ключа/ошибок сети)
+// ——— Гарантированная генерация: OpenAI c таймаутом + фолбэк ———
+function looksLikeRecipe(topic) {
+  return /(рецепт|как приготовить|ингредиент|грамм|крем|тесто|торт|пирог|recipe|ingredients)/i.test(topic || '');
+}
 function universalFallback(topic) {
-  const t = (topic || '').toLowerCase();
-  const looksLikeRecipe = /(рецепт|как приготовить|ингредиент|грамм|крем|тесто|торт|пирог|recipe|ingredients)/i.test(t);
-  if (looksLikeRecipe) {
+  const isRecipe = looksLikeRecipe(topic);
+  if (isRecipe) {
     return ensureOneMessageLimit(sanitizeOutput([
-      'Рецепт: общее руководство без точных граммов (OPENAI_API_KEY не задан).',
+      'Рецепт: технологическая карта (общее руководство без точных граммов).',
       '1) Инвентарь: весы, миски, венчик, лопатка, сотейник/кастрюля, духовка, пергамент.',
-      '2) Ингредиенты: укажите конкретное блюдо и желаемый диаметр/массу — тогда можно рассчитать точные пропорции.',
-      '3) Технология: подготовка → замес/смешивание → выдержка/охлаждение → формовка → выпечка/варка при профильной температуре → стабилизация/остывание.',
-      '4) Тайминг/хранение: зависит от массы и формы; критично выдерживать отдых и охлаждение для стабилизации.',
-      '5) Частые ошибки: несоответствие температур/пропорций; решение — работать по техкарте, контролировать температуру и консистенцию.'
+      '2) Ингредиенты: зависят от блюда и диаметра/массы; укажите точные параметры — рассчитаю пропорции.',
+      '3) Этапы: подготовка → замес/смешивание → выдержка/охлаждение → формовка → выпечка/варка при профильной температуре → стабилизация/остывание.',
+      '4) Тайминг/хранение: зависит от массы/формы; критично выдерживать отдых и охлаждение.',
+      '5) Частые ошибки: несоответствие температур/пропорций; решение — строгая техкарта и контроль.'
     ].join('\n')));
   }
-  // Универсальная профессиональная структура под любую тему
   return ensureOneMessageLimit(sanitizeOutput([
     'Контекст и вводные. Сформулируйте цель, ограничения и критерии успеха; почему тема важна сейчас.',
     'Карта темы. Требования/данные; ресурсы/компетенции; процессы/инструменты; риски/допущения; метрики/контроль.',
@@ -183,7 +173,6 @@ function universalFallback(topic) {
     'Чек‑лист. Цели/KPI; ответственные; бюджет/сроки; данные/доступы; право/комплаенс; риски/план Б; коммуникации; метрики; эскалация; ретроспектива.'
   ].join('\n\n')));
 }
-
 async function generateAnswer(topic) {
   try {
     return await openaiChatAnswer(topic);
@@ -193,7 +182,7 @@ async function generateAnswer(topic) {
   }
 }
 
-// ASR (Whisper): распознаём голос, если есть ключ
+// ——— ASR (Whisper) ———
 async function transcribeVoice(fileUrl) {
   if (!OPENAI_API_KEY) throw new Error('no_openai_key_asr');
   const fileRes = await withTimeout(
@@ -204,12 +193,10 @@ async function transcribeVoice(fileUrl) {
   if (!fileRes.ok) throw new Error(`asr_file_http_${fileRes.status}`);
   const buf = await fileRes.arrayBuffer();
   const blob = new Blob([buf], { type: 'audio/ogg' });
-
   const form = new FormData();
   form.append('file', blob, 'voice.ogg');
   form.append('model', 'whisper-1');
   form.append('response_format', 'text');
-
   const asrRes = await withTimeout(
     (signal) => fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
@@ -228,7 +215,7 @@ async function transcribeVoice(fileUrl) {
   return (text || '').trim();
 }
 
-// ——— Логи и ловля ошибок ———
+// ——— Логи/ловля ошибок ———
 bot.use(async (ctx, next) => {
   try {
     const t = ctx.updateType;
@@ -238,7 +225,6 @@ bot.use(async (ctx, next) => {
   } catch {}
   return next();
 });
-
 bot.catch((err, ctx) => {
   console.error('Telegraf error:', err);
   if (ctx?.chat?.id) ctx.reply('Временная ошибка. Повторите запрос.', replyOptions).catch(() => {});
@@ -248,47 +234,55 @@ bot.catch((err, ctx) => {
 bot.start(async (ctx) => {
   const welcome = [
     'SmartPro 24/7 готов. Пишите тему текстом или голосом — получите один длинный профессиональный ответ без инлайнов и без озвучки.',
-    'Всегда доступна одна Reply‑кнопка «Меню». Синее меню команд: /start /menu /help /pay /ref /version.'
+    'Всегда доступна одна Reply‑кнопка «Меню». Синее меню команд: /start /menu /help /pay /ref /version /debug.'
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(welcome), replyOptions);
 });
-
 bot.command('menu', async (ctx) => {
   const text = [
     'Меню',
     '— Отправьте тему (например: «Рецепт: торт Наполеон» или «Экономика Германии для инвестора»).',
-    '— Голосовые до ~15 сек распознаются (при наличии ключа), ответ — всегда одним длинным текстом.',
+    '— Голосовые до ~15 сек распознаются при наличии ключа, ответ — всегда одним длинным текстом.',
     '— Никаких инлайнов. Всегда одна Reply‑кнопка: «Меню».'
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(text), replyOptions);
 });
-
 bot.command('help', async (ctx) => {
   const text = [
     'Как получить лучший ответ:',
-    '1) Чётко сформулируйте цель и контекст (страна/город/блюдо, сроки, бюджет/масштаб).',
-    '2) Если нужен рецепт — пишите «Рецепт: …», я дам технологическую карту с точными граммами и шагами.',
+    '1) Опишите тему естественно — бот сам определит формат (рецепт, план, аналитика и др.).',
+    '2) Для рецептов указывайте блюдо и диаметр/массу — это влияет на пропорции.',
     '3) Ответ придёт одним длинным сообщением, без цитирования вашего вопроса.'
   ].join('\n\n');
   await ctx.reply(sanitizeOutput(text), replyOptions);
 });
-
 bot.command('pay', async (ctx) => {
-  const text = [
-    'Тарифы (демо): 10 / 20 / 50 USD.',
-    'Оплата и рефералы будут подключены после стабилизации ядра.'
-  ].join('\n\n');
-  await ctx.reply(sanitizeOutput(text), replyOptions);
+  await ctx.reply('Тарифы (демо): 10 / 20 / 50 USD. Подключим после стабилизации ядра.', replyOptions);
 });
-
 bot.command('ref', async (ctx) => {
   const uid = ctx.from?.id || 0;
   const link = BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=ref_${uid}` : 'Ссылка появится после инициализации бота';
   await ctx.reply(sanitizeOutput(`Ваша реф‑ссылка:\n${link}`), replyOptions);
 });
-
 bot.command('version', async (ctx) => {
-  await ctx.reply('UNIVERSAL GPT‑4o — U11-Node', replyOptions);
+  await ctx.reply('UNIVERSAL GPT‑4o — U11b-Node', replyOptions);
+});
+bot.command('debug', async (ctx) => {
+  try {
+    const info = await bot.telegram.getWebhookInfo();
+    const masked = {
+      url: info.url,
+      allowed_updates: info.allowed_updates,
+      pending_update_count: info.pending_update_count,
+      last_error_message: info.last_error_message,
+      secret_token_set: Boolean(SECRET_TOKEN),
+      openai_key_present: !!OPENAI_API_KEY,
+      version: 'U11b-Node'
+    };
+    await ctx.reply(JSON.stringify(masked, null, 2), replyOptions);
+  } catch (e) {
+    await ctx.reply('DEBUG error: ' + e.message, replyOptions);
+  }
 });
 
 // ——— Текст ———
@@ -296,7 +290,7 @@ bot.on('text', async (ctx) => {
   try {
     const txt = (ctx.message?.text || '').trim();
     if (!txt || txt === 'Меню') {
-      return ctx.reply('Выберите действие или напишите тему запроса. Команды: /menu /help /pay /ref /version', replyOptions);
+      return ctx.reply('Выберите действие или напишите тему запроса. Команды: /menu /help /pay /ref /version /debug', replyOptions);
     }
     const stopTyping = startTyping(ctx);
     const answer = await generateAnswer(txt);
@@ -313,9 +307,7 @@ bot.on('voice', async (ctx) => {
   try {
     const fileId = ctx.message?.voice?.file_id;
     if (!fileId) return;
-
     const stopTyping = startTyping(ctx);
-
     let topic = '';
     try {
       const linkObj = await ctx.telegram.getFileLink(fileId);
@@ -324,9 +316,8 @@ bot.on('voice', async (ctx) => {
     } catch (asrErr) {
       console.error('ASR failed:', asrErr.message);
       stopTyping();
-      return ctx.reply('Я получил голосовое. Распознавание сейчас недоступно. Пожалуйста, отправьте тему текстом.', replyOptions);
+      return ctx.reply('Распознавание сейчас недоступно. Отправьте тему текстом.', replyOptions);
     }
-
     const answer = await generateAnswer(topic || 'Пожалуйста, сформулируйте тему запроса.');
     stopTyping();
     await ctx.reply(answer, replyOptions);
@@ -341,7 +332,7 @@ const app = express();
 app.use(express.json());
 
 app.get('/version', (req, res) => {
-  res.type('text/plain').send('UNIVERSAL GPT‑4o — U11-Node');
+  res.type('text/plain').send('UNIVERSAL GPT‑4o — U11b-Node');
 });
 app.get('/telegram/railway123', (req, res) => {
   res.type('text/plain').send('Webhook OK');
