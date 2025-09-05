@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Минимум пакетов; ffmpeg/TTS не нужны (цель — чистый текст)
+# Минимально необходимое
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -9,11 +9,12 @@ RUN npm ci --omit=dev || npm install --omit=dev
 COPY . .
 
 ENV NODE_ENV=production
-ENV PORT=3000
-USER node
-EXPOSE 3000
+# Не фиксируем PORT — Railway передаёт его через переменную окружения
+# EXPOSE не обязателен для Railway
 
+# HEALTHCHECK учитывает динамический порт окружения
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://localhost:3000/version').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
+  CMD node -e "const p=process.env.PORT||3000; fetch('http://127.0.0.1:'+p+'/version').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "index.js"]
+# Запуск
+CMD ["node","index.js"]
