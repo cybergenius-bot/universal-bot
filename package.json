@@ -1,6 +1,6 @@
 {
   "name": "smartpro-telegram-bot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "SmartPro 24/7: длинные профессиональные ответы одним сообщением, без инлайнов и без TTS.",
   "main": "index.js",
   "type": "commonjs",
