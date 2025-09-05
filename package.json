@@ -1,12 +1,10 @@
 {
-  "name": "universal-smartpro-bot",
+  "name": "smartpro-telegram-bot",
   "version": "1.0.0",
-  "description": "Telegram SmartPro 24/7: длинные PRO-ответы одним сообщением, без инлайнов и без TTS.",
+  "description": "SmartPro 24/7: длинные профессиональные ответы одним сообщением, без инлайнов и без TTS.",
   "main": "index.js",
   "type": "commonjs",
-  "engines": {
-    "node": ">=20"
-  },
+  "engines": { "node": ">=20" },
   "scripts": {
     "start": "node index.js"
   },
